@@ -4,6 +4,7 @@ from fastapi import APIRouter, Query
 
 from app.dependencies.auth import CurrentUser, Reports
 from app.schemas.report import (
+    CloseRequest,
     EditRequest,
     InboxResponse,
     ReplyRequest,
@@ -98,5 +99,11 @@ async def reply(report_id: int, body: ReplyRequest, user: CurrentUser, reports: 
     responses={**BAD_REQUEST, **NOT_FOUND, **FORBIDDEN, **CONFLICT, **WRITE},
 )
 async def resolve(report_id: int, body: ResolveRequest, user: CurrentUser, reports: Reports) -> Report:
-    """Close a report as done or rejected, or hand it back as needs-changes (the last two need a note)."""
+    """Mark a report my team received as done, or hand it back as needs-changes (which needs a note)."""
     return await reports.resolve(user, report_id, body)
+
+
+@router.post("/reports/{report_id}/close", response_model=Report, responses={**NOT_FOUND, **CONFLICT, **WRITE})
+async def close(report_id: int, user: CurrentUser, reports: Reports, body: CloseRequest | None = None) -> Report:
+    """Close an open report that is not needed. Anyone may do it; the sender and the holder are notified."""
+    return await reports.close(user, report_id, body or CloseRequest())

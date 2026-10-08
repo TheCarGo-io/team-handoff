@@ -41,7 +41,7 @@ async def test_tools_are_listed(client, tokens, running):
     payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
     response = await client.post("/mcp/", json=payload, headers={**HEADERS, **tokens["ali"]})
     names = sorted(tool["name"] for tool in response.json()["result"]["tools"])
-    assert names == ["board", "edit", "get", "inbox", "reply", "resolve", "send", "take", "withdraw"]
+    assert names == ["board", "close", "edit", "get", "inbox", "reply", "resolve", "send", "take", "withdraw"]
 
 
 async def test_nothing_is_served_without_a_valid_token(client, tokens, running):
@@ -83,13 +83,20 @@ async def test_tools_enforce_the_same_limits_as_the_rest_api(client, tokens, run
 
     too_long = await call(client, tokens["ali"], "reply", {"report_id": report_id, "text": "x" * 200_000})
     empty = await call(client, tokens["ali"], "reply", {"report_id": report_id, "text": "   "})
-    no_reason = await call(client, tokens["ali"], "resolve", {"report_id": report_id, "status": "rejected"})
+    no_reason = await call(client, tokens["ali"], "resolve", {"report_id": report_id, "status": "needs-changes"})
     naive_due = await call(client, tokens["asliddin"], "send", {**report_body(), "due": "2026-10-09T18:00:00"})
     assert [r["isError"] for r in (too_long, empty, no_reason, naive_due)] == [True, True, True, True]
 
     stored = json.loads((await call(client, tokens["ali"], "get", {"report_id": report_id}))["content"][0]["text"])
     assert "replies" not in stored or stored["replies"] == []
     assert "to_user" not in stored and "due" not in stored
+
+
+async def test_close_through_tools(client, tokens, running):
+    sent = await call(client, tokens["asliddin"], "send", dict(report_body()))
+    report_id = json.loads(sent["content"][0]["text"])["id"]
+    closed = await call(client, tokens["dana"], "close", {"report_id": report_id})
+    assert json.loads(closed["content"][0]["text"])["status"] == "closed"
 
 
 async def test_withdraw_through_tools(client, tokens, running):

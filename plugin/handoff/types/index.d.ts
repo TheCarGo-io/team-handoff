@@ -11,7 +11,7 @@ export type Row = {
   priority: 'low' | 'normal' | 'high' | 'urgent'
   due: string | null
   overdue: boolean
-  status: 'sent' | 'taken' | 'done' | 'rejected' | 'needs-changes'
+  status: 'sent' | 'taken' | 'done' | 'rejected' | 'closed' | 'needs-changes'
   assignee: string | null
   replies: number
 }
@@ -26,6 +26,7 @@ export type View = { id: number | null; detail: Detail | null; problem: string }
 
 export type Inbox = {
   isLoaded: boolean
+  isOffline: boolean
   user: string
   project: string
   waiting: number
@@ -38,7 +39,7 @@ export type Inbox = {
 }
 
 export type HandoffEvent = {
-  type: 'new' | 'edited' | 'taken' | 'reply' | 'done' | 'rejected' | 'needs-changes' | 'withdrawn'
+  type: 'new' | 'edited' | 'taken' | 'reply' | 'done' | 'rejected' | 'needs-changes' | 'closed' | 'withdrawn'
   id: number
   title: string
   project: string
@@ -57,6 +58,7 @@ declare module 'claude-code' {
       view: View
       seenBefore: number
       places: Record<string, string>
+      confirming: number | null
     }
   }
 }

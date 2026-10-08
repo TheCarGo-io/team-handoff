@@ -17,9 +17,9 @@ The repo root is also the plugin marketplace (`.claude-plugin/marketplace.json`)
 
 ```
 sent ──take──▶ taken ──done──────────▶ done      (kept 48 h, then deleted)
-  │               ├──rejected─────────▶ rejected  (kept 48 h, then deleted)
   │               └──needs-changes────▶ back to the sender ──edit (version+1)──▶ sent
-  └── done / rejected / needs-changes are also allowed straight from sent
+  ├── done / needs-changes are also allowed straight from sent
+  └── close, from any open status, by anyone ──▶ closed  (kept 48 h, then deleted)
 ```
 
 An open report is deleted after `OPEN_TTL_DAYS` (7) without any change. Only one person can hold a report:
@@ -75,10 +75,11 @@ Claude Code: the notification module uses the hooks-module API (written against 
 | `/handoff:take <id \| next \| all>` | Takes a report, checks it against the code, proposes a plan |
 | `/handoff:reply <id> <message>` | Question or answer under a report |
 | `/handoff:done <id> [note]` | Marks it done |
-| `/handoff:reject <id> <reason> [--needs-changes]` | Rejects it or hands it back |
+| `/handoff:close <id> [note]` | Closes a report nobody needs. Anyone can, no reason required |
+| `/handoff:return <id> <what to change>` | Hands it back to the sender as needs-changes |
 | `/handoff:edit <id> <change>` | Updates a report I sent; the receiver is notified |
 | `/handoff:withdraw <id>` | Deletes a report I sent, for everyone |
-| `/handoffs` | Opens the inbox in a side pane: Read a report in full (text and replies), Take, Continue, Fix, Reply, Done. Listing and reading cost no tokens and do not take the report |
+| `/handoffs` | Opens the inbox in a side pane: Read a report in full (text and replies), Take, Continue, Fix, Reply, Done, Close (press twice, no model call). Listing and reading cost no tokens and do not take the report |
 
 Notifications cost no tokens: the plugin holds one `curl` stream to `/api/v1/events` per interactive session
 and draws a toast and a line above the prompt; both can be switched off in `/config`. With the line switched

@@ -1,12 +1,12 @@
 ---
-description: Send a handoff report to another team (backend, frontend, mobile, design) from this session's work
+description: Send a handoff report to another team from this session's work
 argument-hint: <team> [@person] [what to report] [priority] [due]
 allowed-tools: mcp__plugin_handoff_handoff__send, Bash(date:*)
 ---
 
 Send a handoff report with the handoff `send` tool. Request: $ARGUMENTS
 
-1. The first word is the receiving team. `@name` addresses one person in it. If no team is given, ask which.
+1. The first word is the receiving team. `@name` addresses one person in it. If no team is given, ask which. The server lists the valid teams if the name is wrong.
 2. Write the report from what was actually done in this session and in the code — do not invent endpoints or fields. If the request names a topic you have no context for, read the code first. If the code contradicts what the user asked you to report, say so instead of sending.
    - `title`: one line, what changed or what is needed.
    - `text`: markdown the receiver's Claude can act on without asking: what shipped or what is needed, exact endpoints / payloads / field names with a short example, PR or branch links, how to test, known gaps.

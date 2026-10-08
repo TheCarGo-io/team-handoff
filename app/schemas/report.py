@@ -38,12 +38,12 @@ class Status(str, Enum):
     taken = "taken"
     done = "done"
     rejected = "rejected"
+    closed = "closed"
     needs_changes = "needs-changes"
 
 
 class Resolution(str, Enum):
     done = "done"
-    rejected = "rejected"
     needs_changes = "needs-changes"
 
 
@@ -55,12 +55,13 @@ class EventType(str, Enum):
     done = "done"
     rejected = "rejected"
     needs_changes = "needs-changes"
+    closed = "closed"
     withdrawn = "withdrawn"
 
 
 PRIORITY_ORDER = {Priority.urgent: 0, Priority.high: 1, Priority.normal: 2, Priority.low: 3}
 OPEN_STATUSES = (Status.sent, Status.taken, Status.needs_changes)
-CLOSED_STATUSES = (Status.done, Status.rejected)
+CLOSED_STATUSES = (Status.done, Status.rejected, Status.closed)
 
 
 class Reply(BaseModel):
@@ -137,7 +138,11 @@ class ReplyRequest(BaseModel):
 
 class ResolveRequest(BaseModel):
     status: Resolution
-    note: Line = Field(default="", max_length=1000, description="Required for rejected and needs-changes")
+    note: Line = Field(default="", max_length=1000, description="Required for needs-changes")
+
+
+class CloseRequest(BaseModel):
+    note: Line = Field(default="", max_length=1000, description="Optional: why it is not needed")
 
 
 class InboxResponse(BaseModel):

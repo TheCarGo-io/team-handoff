@@ -170,8 +170,7 @@ async def test_needs_changes_returns_to_the_sender_and_an_edit_resends_it(client
 
 async def test_closed_report_cannot_be_edited(client, tokens):
     report = await send(client, tokens["asliddin"])
-    body = {"status": "rejected", "note": "duplicate"}
-    await client.post(f"/api/v1/reports/{report['id']}/resolve", json=body, headers=tokens["ali"])
+    await client.post(f"/api/v1/reports/{report['id']}/close", json={"note": "duplicate"}, headers=tokens["ali"])
     response = await client.patch(f"/api/v1/reports/{report['id']}", json={"text": "x"}, headers=tokens["asliddin"])
     assert response.status_code == 409
 
@@ -208,14 +207,47 @@ async def test_reply_after_closing_does_not_extend_the_48_hours(client, tokens, 
     assert 3000 < await redis.ttl(key("report", report["id"])) <= 3600
 
 
-async def test_rejecting_or_returning_needs_a_reason(client, tokens):
+async def test_handing_back_needs_a_reason_and_rejected_is_gone(client, tokens):
     report = await send(client, tokens["asliddin"])
     url = f"/api/v1/reports/{report['id']}/resolve"
-    assert (await client.post(url, json={"status": "rejected"}, headers=tokens["ali"])).status_code == 400
+    assert (await client.post(url, json={"status": "rejected", "note": "no"}, headers=tokens["ali"])).status_code == 422
     assert (
         await client.post(url, json={"status": "needs-changes", "note": " "}, headers=tokens["ali"])
     ).status_code == 400
     assert (await client.post(url, json={"status": "done"}, headers=tokens["ali"])).status_code == 200
+
+
+async def test_anyone_can_close_an_open_report_without_a_reason(client, tokens, redis):
+    waiting = await send(client, tokens["asliddin"])
+    held = await send(client, tokens["asliddin"], title="held one")
+    await client.post(f"/api/v1/reports/{held['id']}/take", headers=tokens["ali"])
+
+    by_outsider = await client.post(f"/api/v1/reports/{waiting['id']}/close", headers=tokens["dana"])
+    assert by_outsider.status_code == 200 and by_outsider.json()["status"] == "closed"
+    assert by_outsider.json()["note"] is None and by_outsider.json()["closed_at"]
+
+    by_sender = await client.post(
+        f"/api/v1/reports/{held['id']}/close", json={"note": "not needed"}, headers=tokens["bobur"]
+    )
+    assert by_sender.json()["status"] == "closed" and by_sender.json()["assignee"] == "ali"
+    assert by_sender.json()["note"] == "not needed"
+
+    again = await client.post(f"/api/v1/reports/{held['id']}/close", headers=tokens["ali"])
+    assert again.status_code == 409
+    assert (await client.get("/api/v1/inbox", headers=tokens["ali"])).json()["rows"] == []
+    assert [row["status"] for row in (await client.get("/api/v1/board", headers=tokens["ali"])).json()] == [
+        "closed"
+    ] * 2
+    assert 47 * 3600 < await redis.ttl(key("report", held["id"])) <= 48 * 3600
+
+
+async def test_a_returned_report_can_be_closed_by_its_sender(client, tokens):
+    report = await send(client, tokens["asliddin"])
+    body = {"status": "needs-changes", "note": "which fields?"}
+    await client.post(f"/api/v1/reports/{report['id']}/resolve", json=body, headers=tokens["ali"])
+    closed = await client.post(f"/api/v1/reports/{report['id']}/close", headers=tokens["asliddin"])
+    assert closed.json()["status"] == "closed"
+    assert (await client.get("/api/v1/inbox", headers=tokens["asliddin"])).json()["returned"] == 0
 
 
 async def test_edit_without_a_real_change_is_refused_or_ignored(client, tokens):

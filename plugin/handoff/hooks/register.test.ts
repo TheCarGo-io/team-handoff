@@ -44,7 +44,7 @@ test('a URL or token that could alter the curl config is refused', () => {
 })
 
 test('summary is empty when nothing needs attention', () => {
-  const empty = { isLoaded: true, user: 'ali', project: 'p', waitingForProject: 0, overdue: 0, rows: [], returnedRows: [] }
+  const empty = { isLoaded: true, isOffline: false, user: 'ali', project: 'p', waitingForProject: 0, overdue: 0, rows: [], returnedRows: [] }
 
   expect(summarize({ ...empty, waiting: 0, takenByMe: 0, returned: 0 })).toEqual(undefined)
   expect(summarize({ ...empty, waiting: 2, takenByMe: 1, returned: 1 })).toEqual(
@@ -228,7 +228,7 @@ const ROW = {
 }
 
 for (const surface of ['terminal', 'desktop'] as const) {
-  test(`${surface}: Take and Reply put the command in the prompt and keep a draft`, { options: OPTIONS }, async ($, on) => {
+  test(`${surface}: Take and Reply fill the prompt, Close needs two presses`, { options: OPTIONS }, async ($, on) => {
     const clock = mock.clock(on)
     const prompts: string[] = []
 
@@ -243,16 +243,25 @@ for (const surface of ['terminal', 'desktop'] as const) {
         isStderrTruncated: false,
       },
     }))
-    on('http.fetch', ($$, e) => ({
+    const closes: string[] = []
+
+    on('http.fetch', ($$, e) => {
+      if (e.init?.method === 'POST') {
+        closes.push(e.url)
+      }
+
+      return fetched(e.url)
+    })
+    const fetched = (url: string) => ({
       value: {
         status: 200,
         ok: true,
         headers: {},
-        text: e.url.includes('/reports/12')
+        text: url.includes('/reports/12')
           ? JSON.stringify({ ...ROW, text: '## Paging\nUse `?page` and `?size`.', note: null, replies: [] })
           : JSON.stringify({ ...INBOX, waiting: 1, taken_by_me: 0, overdue: 0, rows: [ROW] }),
       },
-    }))
+    })
     mock.store(on)
     on('process.spawn', async function* () {
       yield { stream: 'stdout' as const, text: `data: ${JSON.stringify(NEW)}\n\n` }
@@ -316,5 +325,11 @@ for (const surface of ['terminal', 'desktop'] as const) {
     draft = ''
     await pane.press({ key: 'back' })
     expect(await pane.find({ key: 'read-12' })).toBeDefined()
+
+    await pane.press({ key: 'close-12' })
+    expect(closes).toEqual([])
+    expect((await pane.find({ key: 'close-12' }))?.text).toEqual('Close? again')
+    await pane.press({ key: 'close-12' })
+    expect(closes).toEqual(['http://handoff.test/api/v1/reports/12/close'])
   })
 }

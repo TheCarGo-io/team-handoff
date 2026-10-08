@@ -7,6 +7,8 @@ from app.repositories.report import ReportRepository
 from app.repositories.user import UserRepository
 from app.schemas.report import (
     CLOSED_STATUSES,
+    OPEN_STATUSES,
+    CloseRequest,
     EditRequest,
     Event,
     EventType,
@@ -185,8 +187,8 @@ class ReportService:
 
     async def resolve(self, actor: User, report_id: int, body: ResolveRequest) -> Report:
         await self.guard(actor)
-        if body.status != Resolution.done and not body.note:
-            raise HandoffError(f"A note saying why is required to mark a report {body.status.value}")
+        if body.status == Resolution.needs_changes and not body.note:
+            raise HandoffError("A note saying what to change is required to hand a report back")
         holder: list[str | None] = [None]
 
         def change(report: Report) -> bool:
@@ -207,6 +209,24 @@ class ReportService:
         await self.emit(
             EventType(body.status.value), report, actor, others(actor, report.from_user, holder[0]), body.note
         )
+        return report
+
+    async def close(self, actor: User, report_id: int, body: CloseRequest) -> Report:
+        await self.guard(actor)
+        holder: list[str | None] = [None]
+
+        def change(report: Report) -> bool:
+            if report.status not in OPEN_STATUSES:
+                raise Conflict(f"Report #{report.id} is already {report.status.value}")
+            holder[0] = report.assignee
+            stamp = now()
+            report.status = Status.closed
+            report.note = body.note or None
+            report.updated_at = report.closed_at = stamp
+            return True
+
+        report, _ = await self.reports.mutate(report_id, change)
+        await self.emit(EventType.closed, report, actor, others(actor, report.from_user, holder[0]), body.note)
         return report
 
     async def edit(self, actor: User, report_id: int, body: EditRequest) -> Report:

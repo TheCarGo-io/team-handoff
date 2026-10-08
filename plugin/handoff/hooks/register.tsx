@@ -7,6 +7,7 @@ const PANE = 'handoffs'
 const SAFETY_REFRESH_MS = 600000
 const EMPTY: Inbox = {
   isLoaded: false,
+  isOffline: false,
   user: '',
   project: '',
   waiting: 0,
@@ -25,6 +26,7 @@ const latest = atom({ plugin: 'handoff', key: 'latest' } as const, null)
 const view = atom({ plugin: 'handoff', key: 'view' } as const, LIST)
 const seenBefore = atom({ plugin: 'handoff', key: 'seenBefore' } as const, 0)
 const places = atom({ plugin: 'handoff', key: 'places' } as const, {})
+const confirming = atom({ plugin: 'handoff', key: 'confirming' } as const, null)
 
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`
 const printable = (text: string) => text.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ')
@@ -48,6 +50,8 @@ export const describeEvent = (event: HandoffEvent): string => {
       return `Handoff #${event.id} sent back by ${who}${note}`
     case 'withdrawn':
       return `Handoff #${event.id} withdrawn by ${who}: ${event.title}`
+    case 'closed':
+      return `Handoff #${event.id} closed by ${who}${note || `: ${event.title}`}`
     default:
       return `Handoff #${event.id} ${event.type} by ${who}${note}`
   }
@@ -133,6 +137,7 @@ const draftSkill = async ($: EngineInterface, skill: 'take' | 'edit' | 'reply' |
 }
 
 let api: { base: string; headers: Record<string, string> } | undefined
+let refreshNow: (() => Promise<void>) | undefined
 let here = ''
 
 const openPane = async ($: EngineInterface) => {
@@ -151,6 +156,36 @@ const readReport = async ($: EngineInterface, id: number) => {
       ? { id, detail: JSON.parse(answer.text) as Detail, problem: '' }
       : { id, detail: null, problem: answer?.status === 404 ? 'This report no longer exists.' : 'Could not load the report.' }
   await update($, view, current => (current.id === id ? shown : current))
+}
+
+const pressClose = async ($: EngineInterface, id: number) => {
+  if ((await read($, confirming)) !== id) {
+    await update($, confirming, () => id)
+    $.clock.after(5000, () => void update($, confirming, armed => (armed === id ? null : armed)))
+
+    return
+  }
+
+  await update($, confirming, () => null)
+  const answer =
+    api &&
+    (await $.http
+      .fetch(`${api.base}/api/v1/reports/${id}/close`, {
+        method: 'POST',
+        headers: { ...api.headers, 'content-type': 'application/json' },
+        body: '{}',
+      })
+      .catch(() => undefined))
+
+  if (answer?.ok !== true) {
+    const reason = answer?.status === 409 ? 'it is already closed' : answer?.status === 404 ? 'it no longer exists' : 'the server did not answer'
+    $.ui.toast(`Could not close #${id}: ${reason}`, { timeoutMs: 6000 })
+  } else {
+    $.ui.toast(`Closed #${id}`)
+    await update($, view, shown => (shown.id === id ? LIST : shown))
+  }
+
+  await refreshNow?.()
 }
 
 export const register: Register = (on, options) => {
@@ -214,6 +249,8 @@ export const register: Register = (on, options) => {
         .catch(() => undefined)
 
       if (answer === undefined) {
+        await update($, inbox, box => ({ ...box, isOffline: true }))
+
         return
       }
 
@@ -244,6 +281,7 @@ export const register: Register = (on, options) => {
       }
       const fresh: Inbox = {
         isLoaded: true,
+        isOffline: false,
         user: body.user,
         project,
         waiting: body.waiting,
@@ -349,6 +387,7 @@ export const register: Register = (on, options) => {
       }
     }
 
+    refreshNow = refresh
     void follow().catch(() => undefined)
     $.clock.every(SAFETY_REFRESH_MS, () => void refresh())
 
@@ -391,6 +430,7 @@ export const register: Register = (on, options) => {
             {box.waitingForProject > 0 && <Text bold>{box.waitingForProject} here</Text>}
             {rest.length > 0 && <Text dimColor>{(box.waitingForProject > 0 ? '· ' : '') + rest.join(' · ')}</Text>}
             {box.overdue > 0 && <Text color="error">· {box.overdue} overdue</Text>}
+            {box.isOffline && <Text color="error">· offline, last known</Text>}
             <Button key="open" label="Open" hotkey="o" dimColor onPress={open} />
           </Box>
           {beneath}
@@ -437,7 +477,18 @@ export const register: Register = (on, options) => {
       )
     }
 
+    const armed = await read($, confirming)
     const isMine = (row: Row) => row.status === 'taken' && row.assignee === box.user
+    const closer = (row: Row) =>
+      row.status === 'sent' || row.status === 'taken' || row.status === 'needs-changes' ? (
+        <Button
+          key={`close-${row.id}`}
+          label={armed === row.id ? 'Close? again' : 'Close'}
+          variant={armed === row.id ? 'primary' : 'secondary'}
+          dimColor={armed !== row.id}
+          onPress={() => void pressClose($, row.id)}
+        />
+      ) : undefined
     const place = (row: Row) => (taken[String(row.id)] === undefined ? '' : ` in ${taken[String(row.id)] === box.project ? 'this project' : taken[String(row.id)]}`)
 
     const action = (row: Row, isFirst: boolean) => {
@@ -503,6 +554,7 @@ export const register: Register = (on, options) => {
             {action(report, true)}
             {isMine(report) && <Button key="done" label="Done" hotkey="d" onPress={() => void draftSkill($, 'done', report.id)} />}
             <Button key="reply" label="Reply" hotkey="r" dimColor onPress={() => void draftSkill($, 'reply', report.id)} />
+            {closer(report)}
             <Box flexGrow={1} />
             {previous && <Button key="previous" label="‹ Prev" hotkey="p" dimColor onPress={() => void readReport($, previous.id)} />}
             {following && <Button key="next" label="Next ›" hotkey="n" dimColor onPress={() => void readReport($, following.id)} />}
@@ -555,7 +607,7 @@ export const register: Register = (on, options) => {
             </Box>
           )}
           <Box marginTop={1}>
-            <Text dimColor>Take, Reply and Done put the command in the prompt; press Enter there to run it · b back · n / p · esc closes</Text>
+            <Text dimColor>Take, Reply and Done put the command in the prompt · Close (press twice) ends the report · b back · n / p</Text>
           </Box>
         </Box>
       )
@@ -588,6 +640,7 @@ export const register: Register = (on, options) => {
 
     return (
       <Box flexDirection="column" paddingX={1}>
+        {box.isOffline && <Text color="error">Offline: the server did not answer. This is the last known state.</Text>}
         <Box gap={1}>
           <Text bold>{plural(box.waiting, 'report')} waiting</Text>
           <Text dimColor>
@@ -633,6 +686,7 @@ export const register: Register = (on, options) => {
                           onPress={() => void readReport($, row.id)}
                         />
                         {action(row, row.id === first)}
+                        {closer(row)}
                       </Box>
                     </Box>
                     <Text color={row.overdue ? 'error' : undefined} dimColor={!row.overdue} wrap="truncate-end">
@@ -651,7 +705,10 @@ export const register: Register = (on, options) => {
           )
         })}
         <Box marginTop={1}>
-          <Text dimColor>● new since you last looked · Read opens it here · Take puts the command in the prompt · esc closes</Text>
+          <Text dimColor>● new since you last looked · Read opens it here · Take puts the command in the prompt</Text>
+        </Box>
+        <Box>
+          <Text dimColor>Close ends a report nobody needs: press twice, anyone can · esc hides this pane</Text>
         </Box>
       </Box>
     )

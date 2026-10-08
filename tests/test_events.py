@@ -154,10 +154,25 @@ async def test_holder_is_notified_when_a_teammate_closes_their_report(client, to
     await client.post(f"/api/v1/reports/{report['id']}/take", headers=tokens["ali"])
     await asyncio.sleep(0.05)
     holder = hub.subscribe(User(name="ali", team="frontend"))
-    body = {"status": "rejected", "note": "duplicate of #3"}
+    body = {"status": "needs-changes", "note": "duplicate of #3"}
     await client.post(f"/api/v1/reports/{report['id']}/resolve", json=body, headers=tokens["vali"])
     event = await next_event(holder)
-    assert event["type"] == "rejected" and event["notify"] is True and event["by_user"] == "vali"
+    assert event["type"] == "needs-changes" and event["notify"] is True and event["by_user"] == "vali"
+
+
+async def test_closing_tells_the_sender_and_the_holder_but_not_the_closer(client, tokens, hub):
+    report = (await client.post("/api/v1/reports", json=report_body(), headers=tokens["asliddin"])).json()
+    await client.post(f"/api/v1/reports/{report['id']}/take", headers=tokens["ali"])
+    await asyncio.sleep(0.05)
+    sender = hub.subscribe(User(name="asliddin", team="backend"))
+    holder = hub.subscribe(User(name="ali", team="frontend"))
+    closer = hub.subscribe(User(name="vali", team="frontend"))
+
+    await client.post(f"/api/v1/reports/{report['id']}/close", json={"note": "obsolete"}, headers=tokens["vali"])
+
+    for watcher, notified in ((sender, True), (holder, True), (closer, False)):
+        event = await next_event(watcher)
+        assert event["type"] == "closed" and event["notify"] is notified and event["note"] == "obsolete"
 
 
 async def test_reply_reaches_both_the_sender_and_the_holder_except_its_author(client, tokens, hub):
