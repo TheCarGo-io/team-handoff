@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+.env
+.ruff_cache/
+.pytest_cache/
+node_modules/
+plugin/handoff/.claude-plugin/types/
+.dev/
+.coverage
+coverage.xml

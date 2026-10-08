@@ -1,0 +1,11 @@
+{
+  "name": "thecargo",
+  "owner": { "name": "TheCargo" },
+  "plugins": [
+    {
+      "name": "handoff",
+      "source": "./plugin/handoff",
+      "description": "Send, receive and track team handoff reports inside Claude Code"
+    }
+  ]
+}

@@ -1,0 +1,116 @@
+name: Build & Deploy
+
+on:
+  push:
+    branches: [development, production]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_name != 'production' }}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/thecargo-io/thecargo-handoff
+  SERVICE_NAME: thecargo_handoff
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Ruff lint + format check
+        run: |
+          pipx run ruff==0.15.9 check app/ tests/
+          pipx run ruff==0.15.9 format --check app/ tests/
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Pytest with coverage gate
+        run: pytest tests/ --cov=app --cov-fail-under=80 --cov-report=term -q
+
+  build:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Resolve image tag
+        id: vars
+        run: echo "tag=${{ github.ref_name == 'production' && 'prod' || 'dev' }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.tag }}
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ github.ref_name }}
+          cache-to: type=gha,scope=${{ github.ref_name }},mode=max
+
+      - name: Smoke test (app boots and registers tools)
+        run: |
+          docker run --rm --entrypoint python ${{ env.IMAGE_NAME }}:${{ github.sha }} -c "
+          import asyncio
+          from app.main import app
+          from app.mcp.server import mcp
+          tools = asyncio.run(mcp.list_tools())
+          assert any(t.name == 'take' for t in tools), 'handoff tools missing'
+          print(f'{len(tools)} tools registered')
+          "
+
+      - name: Push image
+        run: |
+          docker push ${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.tag }}
+          docker push ${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+  deploy:
+    needs: build
+    if: ${{ vars.DEPLOY_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ github.ref_name == 'production' && secrets.PROD_SSH_HOST || secrets.DEPLOY_HOST }}
+          username: ubuntu
+          key: ${{ github.ref_name == 'production' && secrets.PROD_SSH_KEY || secrets.DEPLOY_SSH_KEY }}
+          script: |
+            set -e
+            docker pull ${{ env.IMAGE_NAME }}:${{ github.sha }}
+            docker tag ${{ env.IMAGE_NAME }}:${{ github.sha }} ${{ env.IMAGE_NAME }}:${{ needs.build.outputs.tag }}
+            cd /var/devops/thecargo-handoff
+            make TAG=${{ needs.build.outputs.tag }} HANDOFF_IMAGE=${{ env.IMAGE_NAME }} services-up
