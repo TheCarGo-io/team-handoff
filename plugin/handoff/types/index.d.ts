@@ -59,6 +59,7 @@ declare module 'claude-code' {
       seenBefore: number
       places: Record<string, string>
       confirming: number | null
+      selected: number[]
     }
   }
 }

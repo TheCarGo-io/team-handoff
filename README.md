@@ -72,14 +72,14 @@ Claude Code: the notification module uses the hooks-module API (written against 
 | `/handoff:send <team> [@person] …` | Writes the report from the session's work and sends it |
 | `/handoff:inbox` | My team's queue, most pressing first |
 | `/handoff:board [project]` | Every report of every team |
-| `/handoff:take <id \| next \| all>` | Takes a report, checks it against the code, proposes a plan |
+| `/handoff:take <id [id …] \| next \| all>` | Takes one or several reports in this session, checks each against the code, proposes one plan |
 | `/handoff:reply <id> <message>` | Question or answer under a report |
 | `/handoff:done <id> [note]` | Marks it done |
 | `/handoff:close <id> [note]` | Closes a report nobody needs. Anyone can, no reason required |
 | `/handoff:return <id> <what to change>` | Hands it back to the sender as needs-changes |
 | `/handoff:edit <id> <change>` | Updates a report I sent; the receiver is notified |
 | `/handoff:withdraw <id>` | Deletes a report I sent, for everyone |
-| `/handoffs` | Opens the inbox in a side pane: Read a report in full (text and replies), Take, Continue, Fix, Reply, Done, Close (press twice, no model call). Listing and reading cost no tokens and do not take the report |
+| `/handoffs` | Opens the inbox in a side pane: Read a report in full (text and replies), Take, Continue, Fix, Reply, Done, Close (press twice, no model call). Tick `[ ]` on several rows and press "Take N selected" to take them together. Listing and reading cost no tokens and do not take the report |
 
 Notifications cost no tokens: the plugin holds one `curl` stream to `/api/v1/events` per interactive session
 and draws a toast and a line above the prompt; both can be switched off in `/config`. With the line switched

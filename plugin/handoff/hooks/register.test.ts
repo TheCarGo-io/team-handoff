@@ -326,6 +326,13 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await pane.press({ key: 'back' })
     expect(await pane.find({ key: 'read-12' })).toBeDefined()
 
+    expect(await pane.find({ key: 'take-selected' })).toEqual(undefined)
+    await pane.press({ key: 'pick-12' })
+    expect((await pane.find({ key: 'take-selected' }))?.text).toEqual('Take 1 selected')
+    await pane.press({ key: 'take-selected' })
+    expect(prompts.at(-1)).toEqual('/handoff:take 12 ')
+    expect(await pane.find({ key: 'take-selected' })).toEqual(undefined)
+
     await pane.press({ key: 'close-12' })
     expect(closes).toEqual([])
     expect((await pane.find({ key: 'close-12' }))?.text).toEqual('Close? again')

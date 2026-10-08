@@ -21,12 +21,13 @@ const EMPTY: Inbox = {
 const inbox = atom({ plugin: 'handoff', key: 'inbox' } as const, EMPTY)
 
 const LIST: View = { id: null, detail: null, problem: '' }
-const TAKE_TOOL = 'mcp__plugin_handoff_handoff__take'
+const TAKE_TOOL = /^mcp__.*handoff.*__take$/
 const latest = atom({ plugin: 'handoff', key: 'latest' } as const, null)
 const view = atom({ plugin: 'handoff', key: 'view' } as const, LIST)
 const seenBefore = atom({ plugin: 'handoff', key: 'seenBefore' } as const, 0)
 const places = atom({ plugin: 'handoff', key: 'places' } as const, {})
 const confirming = atom({ plugin: 'handoff', key: 'confirming' } as const, null)
+const selected = atom({ plugin: 'handoff', key: 'selected' } as const, [])
 
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`
 const printable = (text: string) => text.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ')
@@ -119,8 +120,8 @@ export const configProblem = (url: string, token: string): string | undefined =>
   return undefined
 }
 
-const draftSkill = async ($: EngineInterface, skill: 'take' | 'edit' | 'reply' | 'done', id: number) => {
-  const command = `/handoff:${skill} ${id} `
+const draftSkill = async ($: EngineInterface, skill: 'take' | 'edit' | 'reply' | 'done', ids: number | number[]) => {
+  const command = `/handoff:${skill} ${(Array.isArray(ids) ? ids : [ids]).join(' ')} `
   const box = await $.prompt.read().catch(() => ({ text: '' }))
 
   if (box.text.trim() !== '' && !box.text.startsWith('/handoff:')) {
@@ -133,6 +134,8 @@ const draftSkill = async ($: EngineInterface, skill: 'take' | 'edit' | 'reply' |
 
   if (!filled.isFilled) {
     $.ui.toast(`Type ${command.trim()} in the prompt`, { timeoutMs: 8000 })
+  } else if (skill === 'take') {
+    await update($, selected, () => [])
   }
 }
 
@@ -478,6 +481,7 @@ export const register: Register = (on, options) => {
     }
 
     const armed = await read($, confirming)
+    const picked = await read($, selected)
     const isMine = (row: Row) => row.status === 'taken' && row.assignee === box.user
     const closer = (row: Row) =>
       row.status === 'sent' || row.status === 'taken' || row.status === 'needs-changes' ? (
@@ -624,8 +628,13 @@ export const register: Register = (on, options) => {
       { title: 'In progress', rows: box.rows.filter(row => row.status === 'taken') },
       { title: 'Returned to you · needs changes', rows: box.returnedRows },
     ].filter(group => group.rows.length > 0)
-    let room = Math.max(2, Math.floor(((e.viewport?.rows ?? 30) - 5 - groups.length * 2) / 2))
+    let room = Math.max(2, Math.floor(((e.viewport?.rows ?? 30) - 6 - groups.length * 2) / 2))
     const first = groups[0]?.rows[0]?.id
+    const mine = waiting.filter(row => row.to_user === null || row.to_user === box.user)
+    const here = mine.filter(row => row.project === box.project)
+    const takeable = here.length > 1 ? here : mine
+    const chosen = picked.filter(id => waiting.some(row => row.id === id))
+    const toggle = (id: number) => void update($, selected, ids => (ids.includes(id) ? ids.filter(one => one !== id) : [...ids, id]))
 
     const details = (row: Row) =>
       [
@@ -648,6 +657,27 @@ export const register: Register = (on, options) => {
           </Text>
         </Box>
         {groups.length === 0 && <Text dimColor>Nothing waiting. New reports appear here as they arrive.</Text>}
+        {(chosen.length > 0 || takeable.length > 1) && (
+          <Box gap={1}>
+            {chosen.length > 0 && (
+              <Button
+                key="take-selected"
+                label={`Take ${chosen.length} selected`}
+                variant="primary"
+                onPress={() => void draftSkill($, 'take', chosen)}
+              />
+            )}
+            {chosen.length > 0 && <Button key="clear-selected" label="Clear" dimColor onPress={() => void update($, selected, () => [])} />}
+            {chosen.length === 0 && (
+              <Button
+                key="take-all"
+                label={`Take all ${takeable.length}${here.length > 1 ? ' here' : ''}`}
+                dimColor
+                onPress={() => void draftSkill($, 'take', takeable.map(row => row.id))}
+              />
+            )}
+          </Box>
+        )}
         {groups.map(group => {
           const rows = group.rows.slice(0, Math.max(0, room))
           room -= rows.length
@@ -665,6 +695,17 @@ export const register: Register = (on, options) => {
                     <Box gap={1}>
                       <Box width={1} flexShrink={0}>
                         <Text color="success">{isUnread ? '●' : ' '}</Text>
+                      </Box>
+                      <Box width={3} flexShrink={0}>
+                        {row.status === 'sent' && (
+                          <Button
+                            key={`pick-${row.id}`}
+                            label={chosen.includes(row.id) ? '[x]' : '[ ]'}
+                            plain
+                            dimColor={!chosen.includes(row.id)}
+                            onPress={() => toggle(row.id)}
+                          />
+                        )}
                       </Box>
                       <Box width={4} flexShrink={0}>
                         <Text bold>#{row.id}</Text>
@@ -690,7 +731,7 @@ export const register: Register = (on, options) => {
                       </Box>
                     </Box>
                     <Text color={row.overdue ? 'error' : undefined} dimColor={!row.overdue} wrap="truncate-end">
-                      {'              '}
+                      {'                  '}
                       {printable(details(row))}
                     </Text>
                   </Box>
@@ -698,14 +739,14 @@ export const register: Register = (on, options) => {
               })}
               {group.rows.length > rows.length && (
                 <Text dimColor>
-                  {'              '}… {group.rows.length - rows.length} more — /handoff:inbox lists everything
+                  {'                  '}… {group.rows.length - rows.length} more — /handoff:inbox lists everything
                 </Text>
               )}
             </Box>
           )
         })}
         <Box marginTop={1}>
-          <Text dimColor>● new since you last looked · Read opens it here · Take puts the command in the prompt</Text>
+          <Text dimColor>● new since you last looked · [ ] selects several to take together · Read opens it here</Text>
         </Box>
         <Box>
           <Text dimColor>Close ends a report nobody needs: press twice, anyone can · esc hides this pane</Text>
