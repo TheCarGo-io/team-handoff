@@ -8,7 +8,7 @@ Two parts in this repo:
 
 | Part | Where | What it is |
 |---|---|---|
-| Server | `app/` | FastAPI + Redis. REST under `/api/v1`, an SSE stream at `/api/v1/events`, MCP tools at `/mcp/` |
+| Server | `app/` | FastAPI + PostgreSQL (+ Redis for live events). REST under `/api/v1`, an SSE stream at `/api/v1/events`, MCP tools at `/mcp/` |
 | Plugin | `plugin/handoff/` | Claude Code plugin: skills (`/handoff:send` …), the MCP connection, terminal notifications |
 
 The repo root is also the plugin marketplace (`.claude-plugin/marketplace.json`).
@@ -16,16 +16,18 @@ The repo root is also the plugin marketplace (`.claude-plugin/marketplace.json`)
 ## Report lifecycle
 
 ```
-sent ──take──▶ taken ──done──────────▶ done      (kept 48 h, then deleted)
+sent ──take──▶ taken ──done──────────▶ done      
   │               └──needs-changes────▶ back to the sender ──edit (version+1)──▶ sent
   ├── done / needs-changes are also allowed straight from sent
-  └── close, from any open status, by anyone ──▶ closed  (kept 48 h, then deleted)
-  closed / done ──reopen (sender, holder or closer, within the 48 h)──▶ the status it had
+  └── close, from any open status, by anyone ──▶ closed  
+  closed / done ──reopen (sender, holder or closer)──▶ the status it had
 ```
 
-An open report is deleted after `OPEN_TTL_DAYS` (7) without any change. Only one person can hold a report:
-`take` is atomic. The sender can withdraw a report at any time, which deletes it for everyone; an edit replaces
-the text and the old text is not kept.
+Nothing is deleted on a timer. Reports, checklist items, replies, read marks and a history of every change
+live in PostgreSQL; Redis only carries live events between sessions and the per-minute write counter. Lists
+show open reports and those closed or touched in the last `CLOSED_VISIBLE_DAYS` (14); `board?archived=true`
+shows everything. Only one person can hold a report: `take` locks the row. The sender can withdraw a report at
+any time, which deletes it for everyone; an edit replaces the text and the old text is not kept.
 
 A report can carry a checklist (`items`, up to 30): the receiving team ticks items in the pane or with
 `/handoff:check`, and the sender sees the progress. A report and each item also carry a readiness: `ready`,
@@ -52,17 +54,27 @@ Limits: 60 000 characters of text, 50 replies of 20 000 characters, 60 changes p
 
 ```bash
 make install
-cp .env.example .env          # point REDIS_URL at a Redis db of its own
+cp .env.example .env          # DATABASE_URL and REDIS_URL of its own
+make migrate                  # alembic upgrade head
 make run                      # http://127.0.0.1:8012, docs at /docs
-make test
+make test                     # needs a database whose name ends in _test (default: thecargo_handoff_test)
 ```
 
 `PUBLIC_URL` must be the URL clients use: the MCP endpoint only accepts that host (plus localhost).
 Every `/mcp` request needs the bearer token, the handshake included.
 Behind nginx, turn proxy buffering off for `/api/v1/events` (the server already sends `X-Accel-Buffering: no`).
 On SIGTERM the server ends its event streams first, so a redeploy does not wait on them; clients reconnect.
-`/health/ready` is 503 when Redis is unreachable or the event listener is not subscribed. Every change is
+`/health/ready` is 503 when the database or Redis is unreachable or the event listener is not subscribed. Every change is
 logged by the `handoff.audit` logger (report, event, who).
+
+## Database
+
+Schema changes are Alembic revisions under `migrations/` (`make revision MSG="…"`, then review the file).
+The container entrypoint waits for the database, runs `alembic upgrade head`, and starts the server. In a
+stack it builds `DATABASE_URL` from the `db_password` secret and `DB_HOST` (default `postgres:5432`; set it to
+the pooler once the database is listed there — the engine already runs without prepared-statement caching).
+`python -m app.import_redis` is the one-off copy from the Redis storage this service started with; it does
+nothing once the database holds data.
 
 ## Users and tokens
 
@@ -83,8 +95,19 @@ In a container: `docker exec <container> python -m app.cli add <name> <team>`. T
 /plugin install handoff@thecargo
 ```
 
-The install screen asks for the server URL and the personal token (kept in the OS keychain). Needs a recent
+The install screen asks for the server URL and the personal token (kept in the OS keychain).
+
+Updates do not need a restart. An installed copy checks its marketplace at most once every three hours (one
+check per machine, shared by all sessions) and, when a higher version is published, shows `version X is out
+[ Update ]` on the line above the prompt. The button downloads it (`claude plugin update`) and runs
+`/reload-plugins` in that session; other open sessions show the same button until they reload. Without the
+button: `/plugin update handoff@thecargo`, then `/reload-plugins`. Only a changed `version` in `plugin.json`
+counts as an update. Needs a recent
 Claude Code: the notification module uses the hooks-module API (written against 2.1.293).
+
+When the server does not answer (the request fails, comes back 5xx or takes longer than 20 seconds) the line
+above the prompt and the pane say `offline since HH:MM` and keep showing the last known state. The plugin
+tries again after 15 and 30 seconds, then every minute; `[ Retry ]` tries at once.
 
 | Command | What it does |
 |---|---|
@@ -98,7 +121,7 @@ Claude Code: the notification module uses the hooks-module API (written against 
 | `/handoff:check <id> <item numbers>` | Ticks checklist items of a report my team received |
 | `/handoff:ready <id> [items] [note]` | Tells the receiver a waiting report I sent can now be worked on |
 | `/handoff:close <id> [note]` | Closes a report nobody needs. Anyone can, no reason required |
-| `/handoff:reopen <id> [reason]` | Reopens a closed or done report within its 48 hours (sender, holder or closer) |
+| `/handoff:reopen <id> [reason]` | Reopens a closed or done report (sender, holder or closer) |
 | `/handoff:return <id> <what to change>` | Hands it back to the sender as needs-changes |
 | `/handoff:edit <id> <change>` | Updates a report I sent; the receiver is notified |
 | `/handoff:withdraw <id>` | Deletes a report I sent, for everyone |
