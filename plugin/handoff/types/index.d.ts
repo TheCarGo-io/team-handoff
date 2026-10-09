@@ -52,6 +52,7 @@ export type View = { id: number | null; detail: Detail | null; problem: string; 
 export type Inbox = {
   isLoaded: boolean
   isOffline: boolean
+  offlineSince: number | null
   user: string
   team: string
   project: string
@@ -92,6 +93,7 @@ declare module 'claude-code' {
       confirming: number | null
       selected: number[]
       showHidden: boolean
+      newer: string | null
       lastClosed: number | null
     }
   }

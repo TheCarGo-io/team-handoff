@@ -5,9 +5,14 @@ import type { Detail, HandoffEvent, Inbox, Readiness, Row, Thread, View } from '
 
 const PANE = 'handoffs'
 const SAFETY_REFRESH_MS = 600000
+const UPDATE_CHECK_MS = 3 * 60 * 60 * 1000
+const LOAD_TIMEOUT_MS = 20000
+const RETRY_FIRST_MS = 15000
+const RETRY_MAX_MS = 60000
 const EMPTY: Inbox = {
   isLoaded: false,
   isOffline: false,
+  offlineSince: null,
   user: '',
   team: '',
   project: '',
@@ -34,6 +39,7 @@ const places = atom({ plugin: 'handoff', key: 'places' } as const, {})
 const confirming = atom({ plugin: 'handoff', key: 'confirming' } as const, null)
 const selected = atom({ plugin: 'handoff', key: 'selected' } as const, [])
 const showHidden = atom({ plugin: 'handoff', key: 'showHidden' } as const, false)
+const newer = atom({ plugin: 'handoff', key: 'newer' } as const, null)
 const lastClosed = atom({ plugin: 'handoff', key: 'lastClosed' } as const, null)
 
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`
@@ -112,6 +118,14 @@ export const describeAge = (stamp: string, now: number): string => {
   return minutes < 90 ? `${minutes}m ago` : minutes < 2880 ? `${Math.round(minutes / 60)}h ago` : `${Math.round(minutes / 1440)}d ago`
 }
 
+export const describeClock = (stamp: number): string => {
+  const at = new Date(stamp)
+
+  return `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
+}
+
+export const describeOffline = (box: Inbox): string => (box.offlineSince ? `offline since ${describeClock(box.offlineSince)}` : 'offline')
+
 export const summarize = (box: Inbox): string | undefined => {
   const parts = []
 
@@ -172,6 +186,27 @@ export const describeContext = (box: Inbox): string => {
   ]
 
   return lines.join('\n')
+}
+
+export const parseInstall = (root: string) => {
+  const match = /^(.*)\/cache\/([^/]+)\/([^/]+)\/([^/]+)$/.exec(root.replace(/\\/g, '/').replace(/\/+$/, ''))
+
+  return match ? { home: match[1] ?? '', marketplace: match[2] ?? '', plugin: match[3] ?? '', version: match[4] ?? '' } : undefined
+}
+
+export const isNewer = (candidate: string, current: string): boolean => {
+  const numbers = (version: string) => version.split(/[.-]/).map(part => Number.parseInt(part, 10) || 0)
+  const [left, right] = [numbers(candidate), numbers(current)]
+
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const difference = (left[index] ?? 0) - (right[index] ?? 0)
+
+    if (difference !== 0) {
+      return difference > 0
+    }
+  }
+
+  return false
 }
 
 export const configProblem = (url: string, token: string): string | undefined => {
@@ -311,6 +346,68 @@ const pressHide = async ($: EngineInterface, id: number, isHidden: boolean) => {
   await refreshNow?.()
 }
 
+const pressRetry = async ($: EngineInterface) => {
+  await refreshNow?.()
+  const box = await read($, inbox)
+  $.ui.toast(box.isOffline ? 'Handoff: the server still does not answer.' : 'Handoff: back online.', { timeoutMs: 4000 })
+}
+
+const findUpdate = async ($: EngineInterface) => {
+  const install = parseInstall($.plugin.root)
+
+  if (install === undefined) {
+    return
+  }
+
+  const checkedAt = Number((await $.store.get('updateCheckedAt').catch(() => 0)) ?? 0)
+
+  if (Date.now() - checkedAt > UPDATE_CHECK_MS) {
+    await $.store.set('updateCheckedAt', Date.now()).catch(() => undefined)
+    await $.process
+      .run(['claude', 'plugin', 'marketplace', 'update', install.marketplace], { timeoutMs: 60000 })
+      .catch(() => undefined)
+    const manifest = await $.fs
+      .read(`${install.home}/marketplaces/${install.marketplace}/plugin/${install.plugin}/.claude-plugin/plugin.json`)
+      .catch(() => '{}')
+    const published = String((JSON.parse(manifest) as { version?: string }).version ?? '')
+
+    if (published !== '') {
+      await $.store.set('latestVersion', published).catch(() => undefined)
+    }
+  }
+
+  const latestKnown = String((await $.store.get('latestVersion').catch(() => '')) ?? '')
+  await update($, newer, () => (isNewer(latestKnown, install.version) ? latestKnown : null))
+}
+
+const pressUpdate = async ($: EngineInterface) => {
+  const install = parseInstall($.plugin.root)
+
+  if (install === undefined) {
+    return
+  }
+
+  const target = `${install.plugin}@${install.marketplace}`
+  $.ui.toast('Updating the handoff plugin…')
+  const ran = await $.process.run(['claude', 'plugin', 'update', target], { timeoutMs: 120000 }).catch(() => undefined)
+
+  if (ran?.exitCode !== 0) {
+    $.ui.toast(`Could not update. Run /plugin update ${target}`, { timeoutMs: 8000 })
+
+    return
+  }
+
+  await update($, newer, () => null)
+  const isReloaded = await $.command.run({ command: 'reload-plugins' }).then(
+    () => true,
+    () => false,
+  )
+
+  if (!isReloaded) {
+    $.ui.toast('Updated. Run /reload-plugins to start using it.', { timeoutMs: 8000 })
+  }
+}
+
 const pressCheck = async ($: EngineInterface, id: number, item: number, isDone: boolean) => {
   const answer =
     api &&
@@ -373,8 +470,10 @@ export const register: Register = (on, options) => {
     let projects: string[] = []
     let locatedIn = ''
     let isRejected = false
-    let isRefreshing = false
     let isStale = false
+    let running: Promise<void> | undefined
+    let retry: { cancel: () => void } | undefined
+    let retryIn = RETRY_FIRST_MS
 
     const locate = async () => {
       const cwd = await $.session.cwd().catch(() => e.cwd)
@@ -395,13 +494,35 @@ export const register: Register = (on, options) => {
     const load = async () => {
       await locate()
       const query = projects.map(name => `project=${encodeURIComponent(name)}`).join('&')
-      const answer = await $.http.fetch(`${base}/api/v1/inbox?${query}`, { headers }).catch(() => undefined)
+      const answer = await new Promise<Awaited<ReturnType<typeof $.http.fetch>> | undefined>(resolve => {
+        const limit = $.clock.after(LOAD_TIMEOUT_MS, () => resolve(undefined))
+        void $.http
+          .fetch(`${base}/api/v1/inbox?${query}`, { headers })
+          .catch(() => undefined)
+          .then(got => {
+            limit.cancel()
+            resolve(got)
+          })
+      })
 
-      if (answer === undefined) {
-        await update($, inbox, box => ({ ...box, isOffline: true }))
+      if (answer === undefined || answer.status >= 500) {
+        const since = await $.clock.now()
+        await update($, inbox, box => ({ ...box, isOffline: true, offlineSince: (box.isOffline && box.offlineSince) || since }))
+
+        if (retry === undefined) {
+          retry = $.clock.after(retryIn, () => {
+            retry = undefined
+            void refresh()
+          })
+          retryIn = Math.min(retryIn * 2, RETRY_MAX_MS)
+        }
 
         return
       }
+
+      retry?.cancel()
+      retry = undefined
+      retryIn = RETRY_FIRST_MS
 
       if (answer.status === 401) {
         if (!isRejected) {
@@ -436,6 +557,7 @@ export const register: Register = (on, options) => {
       const fresh: Inbox = {
         isLoaded: true,
         isOffline: false,
+        offlineSince: null,
         user: body.user,
         team: body.team,
         project,
@@ -463,25 +585,22 @@ export const register: Register = (on, options) => {
       $.ui.status(options.band === false && summary !== undefined ? `${summary} · /handoffs` : undefined)
     }
 
-    const refresh = async () => {
+    const refresh = (): Promise<void> => {
       isStale = true
-
-      if (isRefreshing) {
-        return
-      }
-
-      isRefreshing = true
-
-      try {
-        while (isStale) {
+      running ??= (async () => {
+        try {
+          while (isStale) {
+            isStale = false
+            await load()
+          }
+        } catch {
           isStale = false
-          await load()
+        } finally {
+          running = undefined
         }
-      } catch {
-        isStale = false
-      } finally {
-        isRefreshing = false
-      }
+      })()
+
+      return running
     }
 
     const receive = (line: string) => {
@@ -551,7 +670,11 @@ export const register: Register = (on, options) => {
 
     refreshNow = refresh
     void follow().catch(() => undefined)
-    $.clock.every(SAFETY_REFRESH_MS, () => void refresh())
+    void findUpdate($).catch(() => undefined)
+    $.clock.every(SAFETY_REFRESH_MS, () => {
+      void refresh()
+      void findUpdate($).catch(() => undefined)
+    })
 
     return started
   })
@@ -574,8 +697,9 @@ export const register: Register = (on, options) => {
     const box = await read($, inbox)
     const event = await read($, latest)
     const summary = summarize(box)
+    const published = await read($, newer)
 
-    if (options.band === false || e.props.hasSurvey || (summary === undefined && event === null)) {
+    if (options.band === false || e.props.hasSurvey || (summary === undefined && event === null && published === null)) {
       return next(e)
     }
 
@@ -606,8 +730,13 @@ export const register: Register = (on, options) => {
               </Text>
             )}
             {box.overdue > 0 && <Text color="error">· {box.overdue} overdue</Text>}
-            {box.isOffline && <Text color="error">· offline, last known</Text>}
-            <Button key="open" label="Open" hotkey="o" dimColor={box.unreadReplies === 0} onPress={open} />
+            {box.isOffline && <Text color="error">· {describeOffline(box)}</Text>}
+            {box.isOffline && <Button key="retry" label="Retry" onPress={() => void pressRetry($)} />}
+            {summary !== undefined && (
+              <Button key="open" label="Open" hotkey="o" dimColor={box.unreadReplies === 0} onPress={open} />
+            )}
+            {published !== null && <Text dimColor>{summary === undefined ? '' : '· '}version {published} is out</Text>}
+            {published !== null && <Button key="update" label="Update" onPress={() => void pressUpdate($)} />}
           </Box>
           {beneath}
         </Box>
@@ -636,6 +765,7 @@ export const register: Register = (on, options) => {
             <Button key="reopen" label="Reopen" hotkey="u" onPress={() => void draftSkill($, 'reopen', event.id)} />
           )}
           <Button key="dismiss" label="Dismiss" hotkey="d" dimColor role="dismiss" onPress={() => void update($, latest, () => null)} />
+          {published !== null && <Button key="update" label={`Update to ${published}`} dimColor onPress={() => void pressUpdate($)} />}
         </Box>
         {beneath}
       </Box>
@@ -901,7 +1031,14 @@ export const register: Register = (on, options) => {
 
     return (
       <Box flexDirection="column" paddingX={1}>
-        {box.isOffline && <Text color="error">Offline: the server did not answer. This is the last known state.</Text>}
+        {box.isOffline && (
+          <Box gap={1}>
+            <Text color="error">
+              {describeOffline(box).replace('offline', 'Offline')}: the server does not answer. This is the last known state.
+            </Text>
+            <Button key="retry" label="Retry" variant="primary" onPress={() => void pressRetry($)} />
+          </Box>
+        )}
         <Box gap={1}>
           <Text bold>{plural(box.waiting, 'report')} waiting</Text>
           <Text dimColor>

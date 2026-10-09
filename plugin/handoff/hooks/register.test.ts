@@ -3,10 +3,13 @@ import { expect, mock, test } from 'claude-code/testing'
 import {
   configProblem,
   describeAge,
+  describeClock,
   describeDue,
   describeEvent,
   describeContext,
   describeReadiness,
+  isNewer,
+  parseInstall,
   projectOf,
   projectsOf,
   summarize,
@@ -54,6 +57,26 @@ test('a URL or token that could alter the curl config is refused', () => {
   )
 })
 
+test('an installed copy knows its marketplace and version, a development copy does not', () => {
+  expect(parseInstall('/Users/a/.claude/plugins/cache/thecargo/handoff/0.5.0')).toEqual({
+    home: '/Users/a/.claude/plugins',
+    marketplace: 'thecargo',
+    plugin: 'handoff',
+    version: '0.5.0',
+  })
+  expect(parseInstall('C:\\Users\\a\\.claude\\plugins\\cache\\thecargo\\handoff\\0.5.0\\')?.version).toEqual('0.5.0')
+  expect(parseInstall('/Users/a/development/thecargo-handoff/plugin/handoff')).toEqual(undefined)
+})
+
+test('a version is newer only when a number in it is higher', () => {
+  expect(isNewer('0.6.0', '0.5.0')).toEqual(true)
+  expect(isNewer('0.10.0', '0.9.3')).toEqual(true)
+  expect(isNewer('1.0', '0.9.9')).toEqual(true)
+  expect(isNewer('0.5.0', '0.5.0')).toEqual(false)
+  expect(isNewer('0.4.9', '0.5.0')).toEqual(false)
+  expect(isNewer('', '0.5.0')).toEqual(false)
+})
+
 test('a folder that is not a repository counts the repositories inside it', () => {
   expect(projectsOf('git@github.com:TheCarGo-io/thecargo-crm.git\n', '', '/x/thecargo-crm-dates')).toEqual(['thecargo-crm'])
   const children = 'git@github.com:TheCarGo-io/thecargo-auth.git\nhttps://github.com/TheCarGo-io/thecargo-auth\nscratch/\n'
@@ -66,6 +89,7 @@ test('summary is empty when nothing needs attention', () => {
   const empty = {
     isLoaded: true,
     isOffline: false,
+    offlineSince: null,
     hiddenRows: [],
     threads: [],
     unreadReplies: 0,
@@ -107,6 +131,11 @@ test('deadlines read as time left or time overdue', () => {
   expect(describeDue('2026-10-08T07:00:00Z', now)).toEqual('overdue by 3h')
   expect(describeAge('2026-10-08T09:59:50Z', now)).toEqual('just now')
   expect(describeAge('2026-10-08T08:00:00Z', now)).toEqual('2h ago')
+})
+
+test('the offline line names the local time the server stopped answering', () => {
+  expect(describeClock(new Date(2026, 9, 9, 21, 8).getTime())).toEqual('21:08')
+  expect(describeClock(new Date(2026, 9, 9, 0, 0).getTime())).toEqual('00:00')
 })
 
 test('session start loads the inbox for this project and shows the count', { options: OPTIONS }, async ($, on) => {
@@ -493,6 +522,72 @@ test('the sender is offered Reopen when their report is closed or done', { optio
   expect(await band.find({ key: 'reopen' })).toEqual(undefined)
 })
 
+
+test('a request that hangs is given up, shown as offline and retried', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on)
+  const toasts: string[] = []
+  let calls = 0
+
+  on('session.start', ($$, e) => ({ cwd: e.cwd }))
+  on('command.register', ($$, e) => ({ value: { command: e.name } }))
+  on('process.run', () => ({
+    value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+  }))
+  on('http.fetch', async () => {
+    calls += 1
+    const call = calls
+
+    if (call === 2) {
+      await clock.sleep(600000)
+    }
+
+    return call === 3
+      ? { value: { status: 502, ok: false, headers: {}, text: '' } }
+      : { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(INBOX) } }
+  })
+  on('process.spawn', async function* () {
+    yield { stream: 'stdout' as const, text: `data: ${JSON.stringify({ ...NEW, notify: false })}\n\n` }
+    await new Promise(() => undefined)
+
+    return { value: { code: 0, signal: null } }
+  })
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.toast', ($$, e) => {
+    toasts.push(e.text)
+
+    return { value: undefined }
+  })
+  on('ui.render', ($$, e) => h($$.ui.resolve(e).Box, {}) as never)
+
+  await $.session.start(START)
+  await clock.advance(10)
+
+  const band = await $.ui.mount({
+    plugin: 'handoff',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isWorking: false } as never,
+  })
+
+  expect(calls).toEqual(2)
+  expect(await band.find({ key: 'retry' })).toEqual(undefined)
+
+  await clock.advance(20000)
+  expect(calls).toEqual(2)
+  expect(await band.find({ type: 'Text', text: /offline since \d\d:\d\d/ })).toBeDefined()
+
+  await clock.advance(15000)
+  expect(calls).toEqual(3)
+  expect(await band.find({ key: 'retry' })).toBeDefined()
+
+  await band.press({ key: 'retry' })
+  expect(calls).toEqual(4)
+  expect(toasts).toEqual(['Handoff: back online.'])
+  expect(await band.find({ key: 'retry' })).toEqual(undefined)
+
+  await clock.advance(60000)
+  expect(calls).toEqual(4)
+})
 
 test('handoff commands get the session context attached, other prompts do not', { options: OPTIONS }, async ($, on) => {
   const clock = mock.clock(on)
