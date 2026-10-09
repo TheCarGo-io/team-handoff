@@ -128,7 +128,8 @@ async def inbox(ctx: Context, project: str | None = None, projects: list[str] | 
     to also get how many reports name them; rows then carry items_here_done / items_here_total.
     `threads` are reports with replies I have not read, whoever they were sent to: the user's own sent
     reports included. `returned_rows` came back as needs-changes. `hidden_rows` are reports the user hid
-    from their own view: leave them out unless asked.
+    from their own view: leave them out unless asked. A row's `read` is false until I open that version of
+    the report (get, take or the pane); an edit by the sender makes it unread again.
     """
     names = [*(projects or []), *([project] if project else [])]
     return compact(await get_report_service().inbox(caller(ctx), names))
@@ -144,8 +145,8 @@ async def board(ctx: Context, project: str | None = None, archived: bool = False
 
 @tool
 async def get(report_id: int, ctx: Context) -> dict:
-    """Read one handoff report in full (text, checklist, replies) without taking it, and mark its replies
-    as read by me. `new_reply_ids` are the replies I had not read before this call."""
+    """Read one handoff report in full (text, checklist, replies) without taking it, and mark it and its
+    replies as read by me. `new_reply_ids` are the replies I had not read before this call."""
     report, fresh = await get_report_service().read(caller(ctx), report_id)
     return {"notice": DATA_NOTICE, "new_reply_ids": fresh, **compact(report)}
 

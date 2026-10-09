@@ -25,6 +25,7 @@ Line = Annotated[str, BeforeValidator(one_line)]
 Body = Annotated[str, BeforeValidator(clean_text)]
 Project = Annotated[str, Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")]
 Ref = Annotated[str, BeforeValidator(one_line), Field(min_length=1, max_length=300)]
+SESSION_ID = r"^[A-Za-z0-9_-]{1,64}$"
 
 
 class Priority(str, Enum):
@@ -106,6 +107,12 @@ class Reply(BaseModel):
     created_at: datetime
 
 
+class WorkSession(BaseModel):
+    id: str = Field(examples=["0b9c2f6e-6a51-4d0f-9f0f-3b1c2a7d5e11"])
+    label: str = Field(examples=["thecargo-frontend"])
+    live: bool = Field(description="Whether that session has its event stream open now")
+
+
 class ReportBase(BaseModel):
     id: int = Field(examples=[12])
     title: str = Field(examples=["GET /loads is now paginated"])
@@ -145,11 +152,19 @@ class ReportRow(ReportBase):
     projects: list[str] = Field(default=[], description="Every repository the report or one of its items names")
     items_here_total: int | None = Field(default=None, description="Items for the projects asked about")
     items_here_done: int | None = None
+    read: bool | None = Field(
+        default=None,
+        description="In my inbox: whether I opened this version of the report. Null where no reader is meant",
+    )
+    session: WorkSession | None = Field(
+        default=None, description="In my inbox, on a report I hold: the session of mine that works on it"
+    )
 
 
 class ThreadRow(ReportRow):
     unread: int = Field(description="Replies by others that I have not read")
     last_reply_by: str
+    last_reply_at: datetime
     last_reply_excerpt: str
 
 
@@ -168,7 +183,9 @@ class Report(ReportBase):
     def projects(self) -> list[str]:
         return list(dict.fromkeys([self.project, *(item.project for item in self.items if item.project)]))
 
-    def row(self, here: set[str] | None = None) -> ReportRow:
+    def row(
+        self, here: set[str] | None = None, read: bool | None = None, session: WorkSession | None = None
+    ) -> ReportRow:
         local = [item for item in self.items if (item.project or self.project) in here] if here else None
         hidden = {"replies", "text", "overdue", "items", "status_before_closing", "delivery_refs"}
         return ReportRow(
@@ -179,6 +196,8 @@ class Report(ReportBase):
             projects=self.projects,
             items_here_total=len(local) if local is not None and self.items else None,
             items_here_done=sum(1 for item in local if item.done) if local is not None and self.items else None,
+            read=read,
+            session=session,
         )
 
     def sort_key(self) -> tuple:
@@ -239,6 +258,11 @@ class DeliveryRequest(BaseModel):
     refs: list[Ref] = Field(default=[], max_length=10, description="Branch, PR link or commit")
 
 
+class SessionRequest(BaseModel):
+    session: str = Field(pattern=SESSION_ID, description="The Claude Code session's id")
+    label: Line = Field(min_length=1, max_length=80, examples=["thecargo-frontend"])
+
+
 class CloseRequest(BaseModel):
     note: Line = Field(default="", max_length=1000, description="Optional: why it is not needed")
 
@@ -254,6 +278,7 @@ class InboxResponse(BaseModel):
     projects: list[str] = Field(default=[], description="The projects asked about, aliases resolved")
     waiting: int = Field(description="Reports sent to my team that nobody has taken yet")
     waiting_for_project: int = Field(description="Of those, the ones that name one of the requested projects")
+    unread: int = Field(default=0, description="Of the waiting reports, the ones I have not opened")
     overdue: int
     taken_by_me: int
     returned: int = Field(description="Reports I sent that came back as needs-changes")

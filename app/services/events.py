@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 
 from redis.asyncio import Redis
@@ -17,8 +18,9 @@ LISTEN_TIMEOUT_SECONDS = 15.0
 
 
 class Subscriber:
-    def __init__(self, user: User):
+    def __init__(self, user: User, session: str | None = None):
         self.user = user
+        self.session = session
         self.queue: asyncio.Queue[dict | None] = asyncio.Queue(maxsize=200)
         self.dropped = False
 
@@ -36,6 +38,7 @@ class EventHub:
     def __init__(self, redis: Redis):
         self.redis = redis
         self.subscribers: list[Subscriber] = []
+        self.left: dict[tuple[str, str], float] = {}
         self.closing = False
         self.listening = False
 
@@ -45,17 +48,38 @@ class EventHub:
         except Exception:
             logger.exception("event %s for report #%s was not published", event.type.value, event.id)
 
-    def subscribe(self, user: User) -> Subscriber:
+    def sessions(self, user: str) -> set[str]:
+        cutoff = time.monotonic() - settings.SESSION_GRACE_SECONDS
+        self.left = {who: at for who, at in self.left.items() if at >= cutoff}
+        streaming = {s.session for s in self.subscribers if s.user.name == user and s.session}
+        return streaming | {session for name, session in self.left if name == user}
+
+    def subscribe(self, user: User, session: str | None = None) -> Subscriber:
         own = [subscriber for subscriber in self.subscribers if subscriber.user.name == user.name]
         for oldest in own[: max(0, len(own) - settings.MAX_STREAMS_PER_USER + 1)]:
             self.drop(oldest)
-        subscriber = Subscriber(user)
+        if session is not None and session not in self.sessions(user.name):
+            self.resync(user.name)
+        subscriber = Subscriber(user, session)
         self.subscribers.append(subscriber)
         return subscriber
 
     def unsubscribe(self, subscriber: Subscriber) -> None:
-        if subscriber in self.subscribers:
-            self.subscribers.remove(subscriber)
+        if subscriber not in self.subscribers:
+            return
+        self.subscribers.remove(subscriber)
+        if subscriber.session is None or self.closing:
+            return
+        self.left[(subscriber.user.name, subscriber.session)] = time.monotonic()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.call_later(settings.SESSION_GRACE_SECONDS + 1, self.settle, subscriber.user.name, subscriber.session)
+
+    def settle(self, user: str, session: str) -> None:
+        if not self.closing and session not in self.sessions(user):
+            self.resync(user)
 
     def drop(self, subscriber: Subscriber) -> None:
         subscriber.dropped = True
@@ -121,8 +145,10 @@ class EventHub:
                 self.listening = False
 
 
-async def stream(hub: EventHub, user: User, still_valid: Callable[[], Awaitable[bool]]) -> AsyncIterator[str]:
-    subscriber = hub.subscribe(user)
+async def stream(
+    hub: EventHub, user: User, still_valid: Callable[[], Awaitable[bool]], session: str | None = None
+) -> AsyncIterator[str]:
+    subscriber = hub.subscribe(user, session)
     try:
         yield ": connected\n\n"
         while not hub.closing and not subscriber.dropped:

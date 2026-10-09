@@ -239,6 +239,44 @@ async def test_becoming_ready_is_announced_as_ready_not_as_an_edit(client, token
     assert event["type"] == "ready" and event["notify"] is True and event["note"] == "live on dev"
 
 
+async def test_a_session_counts_as_open_while_it_listens_and_for_a_while_after(hub, monkeypatch):
+    ali = User(name="ali", team="frontend")
+    other_tab = hub.subscribe(ali)
+
+    first = hub.subscribe(ali, "s-1")
+    assert await next_event(other_tab) == {"type": "resync", "notify": False}
+    assert hub.sessions("ali") == {"s-1"} and hub.sessions("vali") == set()
+
+    hub.unsubscribe(first)
+    assert hub.sessions("ali") == {"s-1"}
+    again = hub.subscribe(ali, "s-1")
+    await asyncio.sleep(0.05)
+    assert other_tab.queue.empty()
+
+    hub.unsubscribe(again)
+    monkeypatch.setattr(settings, "SESSION_GRACE_SECONDS", 0)
+    await asyncio.sleep(0.01)
+    assert hub.sessions("ali") == set()
+    hub.settle("ali", "s-1")
+    assert await next_event(other_tab) == {"type": "resync", "notify": False}
+
+
+async def test_putting_a_report_in_a_session_refreshes_only_my_own_sessions(client, tokens, hub):
+    report = (await client.post("/api/v1/reports", json=report_body(), headers=tokens["asliddin"])).json()
+    await client.post(f"/api/v1/reports/{report['id']}/take", headers=tokens["ali"])
+    await asyncio.sleep(0.05)
+    mine = hub.subscribe(User(name="ali", team="frontend"))
+    teammate = hub.subscribe(User(name="vali", team="frontend"))
+
+    body = {"session": "s-1", "label": "thecargo-frontend"}
+    await client.put(f"/api/v1/reports/{report['id']}/session", json=body, headers=tokens["ali"])
+
+    assert await next_event(mine) == {"type": "resync", "notify": False}
+    await asyncio.sleep(0.05)
+    assert teammate.queue.empty()
+    assert (await client.get("/api/v1/events?session=not%20an%20id", headers=tokens["ali"])).status_code == 422
+
+
 async def test_hiding_refreshes_only_my_own_sessions(client, tokens, hub):
     report = (await client.post("/api/v1/reports", json=report_body(), headers=tokens["asliddin"])).json()
     await asyncio.sleep(0.05)

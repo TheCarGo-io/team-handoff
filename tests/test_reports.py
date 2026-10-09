@@ -2,6 +2,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 from app.core.config import settings
+from app.schemas.user import User
 from tests.conftest import report_body
 
 
@@ -556,6 +557,85 @@ async def test_unread_replies_stay_visible_on_a_closed_report_and_vanish_with_it
     assert (await client.get("/api/v1/inbox", headers=tokens["asliddin"])).json()["threads"] == []
     assert await database("select count(*) from reply_reads") == 0
     assert await database("select count(*) from replies") == 0
+
+
+async def test_a_report_is_unread_until_i_open_it_and_again_after_the_sender_edits_it(client, tokens):
+    rid = (await send(client, tokens["asliddin"]))["id"]
+
+    async def inbox(name: str) -> dict:
+        return (await client.get("/api/v1/inbox", headers=tokens[name])).json()
+
+    box = await inbox("ali")
+    assert box["unread"] == 1 and box["rows"][0]["read"] is False
+
+    await client.get(f"/api/v1/reports/{rid}", headers=tokens["ali"])
+    assert (await inbox("ali"))["rows"][0]["read"] is False
+    await client.get(f"/api/v1/reports/{rid}?mark_seen=true", headers=tokens["ali"])
+    box = await inbox("ali")
+    assert box["unread"] == 0 and box["rows"][0]["read"] is True
+    assert (await inbox("vali"))["rows"][0]["read"] is False
+
+    await client.patch(f"/api/v1/reports/{rid}", json={"text": "now with page sizes"}, headers=tokens["asliddin"])
+    box = await inbox("ali")
+    assert box["unread"] == 1 and box["rows"][0]["read"] is False
+
+
+async def test_taking_a_report_reads_it_and_the_sender_never_has_to(client, tokens):
+    rid = (await send(client, tokens["asliddin"]))["id"]
+    await client.post(f"/api/v1/reports/{rid}/take", headers=tokens["ali"])
+
+    holder = (await client.get("/api/v1/inbox", headers=tokens["ali"])).json()
+    assert holder["rows"][0]["read"] is True and holder["unread"] == 0
+    teammate = (await client.get("/api/v1/inbox", headers=tokens["vali"])).json()
+    assert teammate["rows"][0]["read"] is False and teammate["unread"] == 0
+
+    body = {"status": "needs-changes", "note": "which page size?"}
+    await client.post(f"/api/v1/reports/{rid}/resolve", json=body, headers=tokens["ali"])
+    sender = (await client.get("/api/v1/inbox", headers=tokens["asliddin"])).json()
+    assert sender["returned_rows"][0]["read"] is True
+
+    board = (await client.get("/api/v1/board", headers=tokens["ali"])).json()
+    assert board[0]["read"] is None
+
+
+async def test_a_report_i_hold_can_be_put_in_one_of_my_sessions(client, tokens, hub):
+    rid = (await send(client, tokens["asliddin"]))["id"]
+    url = f"/api/v1/reports/{rid}/session"
+    body = {"session": "s-web-1", "label": "thecargo-frontend"}
+
+    async def row(name: str) -> dict:
+        return (await client.get("/api/v1/inbox", headers=tokens[name])).json()["rows"][0]
+
+    refused = await client.put(url, json=body, headers=tokens["ali"])
+    assert refused.status_code == 409 and "take it first" in refused.json()["detail"]
+    await client.post(f"/api/v1/reports/{rid}/take", headers=tokens["ali"])
+    assert (await client.put(url, json={**body, "session": "not an id"}, headers=tokens["ali"])).status_code == 422
+    assert (await client.put(url, json=body, headers=tokens["vali"])).status_code == 409
+
+    assert (await client.put(url, json=body, headers=tokens["ali"])).status_code == 204
+    assert (await row("ali"))["session"] == {"id": "s-web-1", "label": "thecargo-frontend", "live": False}
+    assert (await row("vali"))["session"] is None
+
+    hub.subscribe(User(name="ali", team="frontend"), "s-web-1")
+    assert (await row("ali"))["session"]["live"] is True
+
+    moved = {"session": "s-web-2", "label": "thecargo-frontend"}
+    await client.put(url, json=moved, headers=tokens["ali"])
+    assert (await row("ali"))["session"] == {"id": "s-web-2", "label": "thecargo-frontend", "live": False}
+
+    assert (await client.delete(url, headers=tokens["ali"])).status_code == 204
+    held = await row("ali")
+    assert held["session"] is None and held["read"] is True
+
+
+async def test_a_thread_says_when_its_last_reply_came(client, tokens):
+    rid = (await send(client, tokens["asliddin"]))["id"]
+    report = (
+        await client.post(f"/api/v1/reports/{rid}/replies", json={"text": "which env?"}, headers=tokens["ali"])
+    ).json()
+
+    thread = (await client.get("/api/v1/inbox", headers=tokens["asliddin"])).json()["threads"][0]
+    assert thread["last_reply_at"] == report["replies"][-1]["created_at"]
 
 
 async def test_done_is_refused_while_items_are_unticked_unless_told_otherwise(client, tokens):

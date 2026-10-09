@@ -1,8 +1,9 @@
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
+from typing import NamedTuple
 
 from redis.asyncio import Redis
-from sqlalchemy import delete, func, or_, select, text
+from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import defer
@@ -34,6 +35,16 @@ COLUMNS = (
     "related",
 )
 ENUMS = ("priority", "status", "readiness", "delivery", "status_before_closing")
+
+
+class Mark(NamedTuple):
+    reply_id: int = 0
+    version: int = 0
+    session: str | None = None
+    label: str | None = None
+
+
+UNSEEN = Mark()
 
 
 def to_item(record: ItemRecord) -> Item:
@@ -121,18 +132,50 @@ class ReportRepository:
         async with self.sessions() as session, session.begin():
             await session.execute(statement)
 
-    async def seen(self, user: str) -> dict[int, int]:
+    async def seen(self, user: str) -> dict[int, Mark]:
         async with self.sessions() as session:
             rows = await session.execute(
-                select(ReplyRead.report_id, ReplyRead.reply_id).where(ReplyRead.user_name == user)
+                select(
+                    ReplyRead.report_id,
+                    ReplyRead.reply_id,
+                    ReplyRead.report_version,
+                    ReplyRead.session_id,
+                    ReplyRead.session_label,
+                ).where(ReplyRead.user_name == user)
             )
-            return {report_id: reply_id for report_id, reply_id in rows}
+            return {report_id: Mark(*mark) for report_id, *mark in rows}
 
-    async def mark_seen(self, user: str, report_id: int, reply_id: int) -> None:
-        statement = insert(ReplyRead).values(user_name=user, report_id=report_id, reply_id=reply_id)
+    async def mark_seen(self, user: str, report: Report) -> None:
+        reply_id = report.replies[-1].id if report.replies else 0
+        statement = insert(ReplyRead).values(
+            user_name=user, report_id=report.id, reply_id=reply_id, report_version=report.version
+        )
         statement = statement.on_conflict_do_update(
             index_elements=[ReplyRead.user_name, ReplyRead.report_id],
-            set_={"reply_id": func.greatest(ReplyRead.reply_id, reply_id)},
+            set_={
+                "reply_id": func.greatest(ReplyRead.reply_id, reply_id),
+                "report_version": func.greatest(ReplyRead.report_version, report.version),
+            },
+        )
+        async with self.sessions() as session, session.begin():
+            await session.execute(statement)
+
+    async def assign(self, user: str, report_id: int, work_session: str, label: str) -> None:
+        statement = insert(ReplyRead).values(
+            user_name=user, report_id=report_id, reply_id=0, session_id=work_session, session_label=label
+        )
+        statement = statement.on_conflict_do_update(
+            index_elements=[ReplyRead.user_name, ReplyRead.report_id],
+            set_={"session_id": work_session, "session_label": label},
+        )
+        async with self.sessions() as session, session.begin():
+            await session.execute(statement)
+
+    async def release(self, user: str, report_id: int) -> None:
+        statement = (
+            update(ReplyRead)
+            .where(ReplyRead.user_name == user, ReplyRead.report_id == report_id)
+            .values(session_id=None, session_label=None)
         )
         async with self.sessions() as session, session.begin():
             await session.execute(statement)

@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     CLOSED_VISIBLE_DAYS: int = 14
     SSE_HEARTBEAT_SECONDS: float = 25.0
     MAX_STREAMS_PER_USER: int = 20
+    SESSION_GRACE_SECONDS: float = 90.0
     MAX_TEXT_LENGTH: int = 60000
     MAX_REPLY_LENGTH: int = 20000
     MAX_REPLIES: int = 50

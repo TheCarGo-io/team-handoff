@@ -15,6 +15,7 @@ from app.schemas.report import (
     ReportRow,
     ResolveRequest,
     SendRequest,
+    SessionRequest,
 )
 from app.schemas.responses import BAD_REQUEST, CONFLICT, FORBIDDEN, NOT_FOUND, UNAUTHORIZED, WRITE
 from app.schemas.user import User
@@ -64,7 +65,7 @@ async def take_next(user: CurrentUser, reports: Reports, project: Project = None
 
 @router.get("/reports/{report_id}", response_model=Report, responses=NOT_FOUND)
 async def get(report_id: int, user: CurrentUser, reports: Reports, mark_seen: bool = False) -> Report:
-    """One report with its full text and replies. `mark_seen=true` marks its replies as read by me."""
+    """One report with its full text and replies. `mark_seen=true` marks it and its replies as read by me."""
     report, _ = await reports.read(user, report_id, mark_seen)
     return report
 
@@ -152,6 +153,19 @@ async def hide(report_id: int, user: CurrentUser, reports: Reports) -> None:
 async def unhide(report_id: int, user: CurrentUser, reports: Reports) -> None:
     """Show a report I hid again."""
     await reports.hide(user, report_id, False)
+
+
+@router.put("/reports/{report_id}/session", status_code=204, responses={**NOT_FOUND, **CONFLICT})
+async def assign(report_id: int, body: SessionRequest, user: CurrentUser, reports: Reports) -> None:
+    """Say which of my Claude Code sessions works on a report I hold. My other sessions then list it apart;
+    nobody else is told. Taking a report in a session does this by itself when the plugin is installed."""
+    await reports.assign(user, report_id, body)
+
+
+@router.delete("/reports/{report_id}/session", status_code=204, responses=NOT_FOUND)
+async def release(report_id: int, user: CurrentUser, reports: Reports) -> None:
+    """Take a report I hold out of the session it was put in: every session of mine lists it again."""
+    await reports.release(user, report_id)
 
 
 @router.post(

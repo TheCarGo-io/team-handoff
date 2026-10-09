@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 
 from app.core.config import settings
 from app.core.errors import Conflict, Forbidden, HandoffError, NotFound, TooManyRequests
-from app.repositories.report import ReportRepository
+from app.repositories.report import UNSEEN, Mark, ReportRepository
 from app.repositories.user import UserRepository
 from app.schemas.report import (
     CLOSED_STATUSES,
@@ -26,8 +26,10 @@ from app.schemas.report import (
     Resolution,
     ResolveRequest,
     SendRequest,
+    SessionRequest,
     Status,
     ThreadRow,
+    WorkSession,
 )
 from app.schemas.user import User
 from app.services.events import EventHub
@@ -72,9 +74,13 @@ def is_party(report: Report, user: User) -> bool:
     return user.name in names
 
 
-def unread_replies(report: Report, user: User, seen: dict[int, int]) -> list[Reply]:
-    mark = seen.get(report.id, 0)
+def unread_replies(report: Report, user: User, seen: dict[int, Mark]) -> list[Reply]:
+    mark = seen.get(report.id, UNSEEN).reply_id
     return [reply for reply in report.replies if reply.user != user.name and reply.id > mark]
+
+
+def is_read(report: Report, user: User, seen: dict[int, Mark]) -> bool:
+    return report.from_user == user.name or seen.get(report.id, UNSEEN).version >= report.version
 
 
 class ReportService:
@@ -157,9 +163,10 @@ class ReportService:
 
     async def read(self, actor: User, report_id: int, mark_seen: bool = True) -> tuple[Report, list[int]]:
         report = await self.reports.get(report_id)
-        fresh = unread_replies(report, actor, await self.reports.seen(actor.name))
-        if mark_seen and fresh:
-            await self.reports.mark_seen(actor.name, report_id, report.replies[-1].id)
+        seen = await self.reports.seen(actor.name)
+        fresh = unread_replies(report, actor, seen)
+        if mark_seen and (fresh or not is_read(report, actor, seen)):
+            await self.reports.mark_seen(actor.name, report)
             await self.hub.refresh_user(actor.name)
         return report, [reply.id for reply in fresh]
 
@@ -185,14 +192,30 @@ class ReportService:
         waiting = [r for r in mine if r.status == Status.sent]
         returned = [r for r in reports if r.from_user == actor.name and r.status == Status.needs_changes]
         seen = await self.reports.seen(actor.name)
+        live = self.hub.sessions(actor.name)
+
+        def row(report: Report) -> ReportRow:
+            mark = seen.get(report.id, UNSEEN)
+            is_held = report.status == Status.taken and report.assignee == actor.name
+            work = (
+                WorkSession(id=mark.session, label=mark.label or "", live=mark.session in live)
+                if is_held and mark.session
+                else None
+            )
+            return report.row(here_set, is_read(report, actor, seen), work)
+
         threads = []
         for report in reports:
             fresh = unread_replies(report, actor, seen) if is_party(report, actor) else []
             if fresh:
                 last = fresh[-1]
-                excerpt = " ".join(last.text.split())[:200]
-                extra = {"unread": len(fresh), "last_reply_by": last.user, "last_reply_excerpt": excerpt}
-                threads.append((last.id, ThreadRow(**report.row(here_set).model_dump(exclude={"overdue"}), **extra)))
+                extra = {
+                    "unread": len(fresh),
+                    "last_reply_by": last.user,
+                    "last_reply_at": last.created_at,
+                    "last_reply_excerpt": " ".join(last.text.split())[:200],
+                }
+                threads.append((last.id, ThreadRow(**row(report).model_dump(exclude={"overdue"}), **extra)))
         threads.sort(key=lambda pair: pair[0], reverse=True)
         return InboxResponse(
             team=actor.team,
@@ -201,13 +224,14 @@ class ReportService:
             projects=here,
             waiting=len(waiting),
             waiting_for_project=sum(1 for r in waiting if here_set.intersection(r.projects)),
+            unread=sum(1 for r in waiting if not is_read(r, actor, seen)),
             overdue=sum(1 for r in mine if r.overdue),
             taken_by_me=sum(1 for r in mine if r.status == Status.taken and r.assignee == actor.name),
             returned=len(returned),
-            rows=[r.row(here_set) for r in mine],
-            returned_rows=[r.row(here_set) for r in returned],
+            rows=[row(r) for r in mine],
+            returned_rows=[row(r) for r in returned],
             hidden=len(tucked),
-            hidden_rows=[r.row(here_set) for r in tucked],
+            hidden_rows=[row(r) for r in tucked],
             unread_replies=sum(row.unread for _, row in threads),
             threads=[row for _, row in threads],
         )
@@ -218,6 +242,18 @@ class ReportService:
             await self.reports.hide(actor.name, report_id)
         else:
             await self.reports.unhide(actor.name, report_id)
+        await self.hub.refresh_user(actor.name)
+
+    async def assign(self, actor: User, report_id: int, body: SessionRequest) -> None:
+        report = await self.reports.get(report_id)
+        if report.status != Status.taken or report.assignee != actor.name:
+            raise Conflict(f"Report #{report_id} is not held by you; take it first")
+        await self.reports.assign(actor.name, report_id, body.session, body.label)
+        await self.hub.refresh_user(actor.name)
+
+    async def release(self, actor: User, report_id: int) -> None:
+        await self.reports.get(report_id)
+        await self.reports.release(actor.name, report_id)
         await self.hub.refresh_user(actor.name)
 
     async def take(self, actor: User, report_id: int) -> Report:
@@ -238,8 +274,7 @@ class ReportService:
 
         report, changed = await self.reports.mutate(report_id, change)
         await self.reports.unhide(actor.name, report_id)
-        if report.replies:
-            await self.reports.mark_seen(actor.name, report_id, report.replies[-1].id)
+        await self.reports.mark_seen(actor.name, report)
         if changed:
             await self.emit(EventType.taken, report, actor, [report.from_user])
         return report
@@ -272,7 +307,7 @@ class ReportService:
             return True
 
         report, _ = await self.reports.mutate(report_id, change)
-        await self.reports.mark_seen(actor.name, report_id, report.replies[-1].id)
+        await self.reports.mark_seen(actor.name, report)
         audience = others(actor, report.from_user, report.assignee, report.to_user)
         await self.emit(EventType.reply, report, actor, audience or None, note=body.text)
         return report

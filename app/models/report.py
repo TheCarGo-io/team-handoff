@@ -76,6 +76,9 @@ class ReplyRead(Base):
     user_name: Mapped[str] = mapped_column(String(64), primary_key=True)
     report_id: Mapped[int] = mapped_column(ForeignKey("reports.id", ondelete="CASCADE"), primary_key=True)
     reply_id: Mapped[int] = mapped_column(Integer)
+    report_version: Mapped[int] = mapped_column(Integer, server_default="0")
+    session_id: Mapped[str | None] = mapped_column(String(64))
+    session_label: Mapped[str | None] = mapped_column(String(80))
 
 
 class HiddenReport(Base):
