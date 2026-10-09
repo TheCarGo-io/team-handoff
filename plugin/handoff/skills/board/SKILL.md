@@ -1,5 +1,5 @@
 ---
-description: Show the whole handoff board — every report of every team and who is working on what
+description: Show the whole handoff board as one table by status (for a per-project view use handoff:status)
 argument-hint: [project]
 allowed-tools: mcp__plugin_handoff_handoff__board
 ---

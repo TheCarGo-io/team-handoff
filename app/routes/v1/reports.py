@@ -4,9 +4,12 @@ from fastapi import APIRouter, Query
 
 from app.dependencies.auth import CurrentUser, Reports
 from app.schemas.report import (
+    CheckRequest,
     CloseRequest,
+    DeliveryRequest,
     EditRequest,
     InboxResponse,
+    ReopenRequest,
     ReplyRequest,
     Report,
     ReportRow,
@@ -19,6 +22,10 @@ from app.schemas.user import User
 router = APIRouter(prefix="/api/v1", tags=["reports"], responses=UNAUTHORIZED)
 
 Project = Annotated[str | None, Query(description="Repository name, e.g. thecargo-frontend")]
+Projects = Annotated[
+    list[str],
+    Query(alias="project", description="Repository names of this session; repeat the parameter for a workspace"),
+]
 
 
 @router.get("/me", response_model=User)
@@ -28,9 +35,11 @@ async def me(user: CurrentUser) -> User:
 
 
 @router.get("/inbox", response_model=InboxResponse)
-async def inbox(user: CurrentUser, reports: Reports, project: Project = None) -> InboxResponse:
-    """My team's open reports (most pressing first) with the counts the terminal badge shows."""
-    return await reports.inbox(user, project)
+async def inbox(user: CurrentUser, reports: Reports, projects: Projects = []) -> InboxResponse:  # noqa: B006
+    """My team's open reports (most pressing first) with the counts the terminal badge shows. Reports I hid
+    are left out of both and listed under `hidden_rows`; `threads` are reports with replies I have not read,
+    whichever team they were sent to."""
+    return await reports.inbox(user, projects)
 
 
 @router.get("/board", response_model=list[ReportRow])
@@ -47,14 +56,15 @@ async def send(body: SendRequest, user: CurrentUser, reports: Reports) -> Report
 
 @router.post("/reports/take-next", response_model=Report, responses={**NOT_FOUND, **WRITE})
 async def take_next(user: CurrentUser, reports: Reports, project: Project = None) -> Report:
-    """Take the most pressing waiting report of my team that is not addressed to someone else."""
+    """Take the most pressing waiting report of my team that is ready and not addressed to someone else."""
     return await reports.take_next(user, project)
 
 
 @router.get("/reports/{report_id}", response_model=Report, responses=NOT_FOUND)
-async def get(report_id: int, user: CurrentUser, reports: Reports) -> Report:
-    """One report with its full text and replies."""
-    return await reports.get(report_id)
+async def get(report_id: int, user: CurrentUser, reports: Reports, mark_seen: bool = False) -> Report:
+    """One report with its full text and replies. `mark_seen=true` marks its replies as read by me."""
+    report, _ = await reports.read(user, report_id, mark_seen)
+    return report
 
 
 @router.patch(
@@ -63,7 +73,8 @@ async def get(report_id: int, user: CurrentUser, reports: Reports) -> Report:
     responses={**BAD_REQUEST, **NOT_FOUND, **FORBIDDEN, **CONFLICT, **WRITE},
 )
 async def edit(report_id: int, body: EditRequest, user: CurrentUser, reports: Reports) -> Report:
-    """Edit a report I sent. A real change bumps its version; a needs-changes report goes back to sent."""
+    """Edit a report I sent: text, checklist, readiness. A real change bumps its version; a needs-changes
+    report goes back to sent; flipping to ready tells the receiver."""
     return await reports.edit(user, report_id, body)
 
 
@@ -103,7 +114,49 @@ async def resolve(report_id: int, body: ResolveRequest, user: CurrentUser, repor
     return await reports.resolve(user, report_id, body)
 
 
+@router.post(
+    "/reports/{report_id}/items/check",
+    response_model=Report,
+    responses={**BAD_REQUEST, **NOT_FOUND, **FORBIDDEN, **CONFLICT, **WRITE},
+)
+async def check(report_id: int, body: CheckRequest, user: CurrentUser, reports: Reports) -> Report:
+    """Tick (or untick) checklist items of a report my team received. The sender is told the progress."""
+    return await reports.check(user, report_id, body)
+
+
 @router.post("/reports/{report_id}/close", response_model=Report, responses={**NOT_FOUND, **CONFLICT, **WRITE})
 async def close(report_id: int, user: CurrentUser, reports: Reports, body: CloseRequest | None = None) -> Report:
     """Close an open report that is not needed. Anyone may do it; the sender and the holder are notified."""
     return await reports.close(user, report_id, body or CloseRequest())
+
+
+@router.post(
+    "/reports/{report_id}/reopen",
+    response_model=Report,
+    responses={**NOT_FOUND, **FORBIDDEN, **CONFLICT, **WRITE},
+)
+async def reopen(report_id: int, user: CurrentUser, reports: Reports, body: ReopenRequest | None = None) -> Report:
+    """Reopen a closed or done report within its 48 hours. Its sender, its holder or whoever closed it may."""
+    return await reports.reopen(user, report_id, body or ReopenRequest())
+
+
+@router.post("/reports/{report_id}/hide", status_code=204, responses=NOT_FOUND)
+async def hide(report_id: int, user: CurrentUser, reports: Reports) -> None:
+    """Hide a report from my own inbox and counts. Nothing changes for anyone else."""
+    await reports.hide(user, report_id, True)
+
+
+@router.delete("/reports/{report_id}/hide", status_code=204, responses=NOT_FOUND)
+async def unhide(report_id: int, user: CurrentUser, reports: Reports) -> None:
+    """Show a report I hid again."""
+    await reports.hide(user, report_id, False)
+
+
+@router.post(
+    "/reports/{report_id}/delivery",
+    response_model=Report,
+    responses={**NOT_FOUND, **FORBIDDEN, **CONFLICT, **WRITE},
+)
+async def deliver(report_id: int, body: DeliveryRequest, user: CurrentUser, reports: Reports) -> Report:
+    """Record where the work of a done report is now: local, pushed, pr or merged. The sender is told."""
+    return await reports.deliver(user, report_id, body)

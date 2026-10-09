@@ -19,7 +19,8 @@ SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     responses={200: {"content": {"text/event-stream": {}}, "description": "One `data:` JSON line per event"}},
 )
 async def events(user: CurrentUser, authorization: Authorization = None) -> StreamingResponse:
-    """Server-sent events for my team: new, edited, taken, reply, done, needs-changes, closed, withdrawn.
+    """Server-sent events for my team: new, edited, ready, taken, progress, reply, done, needs-changes,
+    closed, reopened, withdrawn.
 
     `resync` means events may have been missed: re-read the inbox. The stream ends when the token is revoked.
     """

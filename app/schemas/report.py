@@ -24,6 +24,7 @@ def clean_text(value: object) -> object:
 Line = Annotated[str, BeforeValidator(one_line)]
 Body = Annotated[str, BeforeValidator(clean_text)]
 Project = Annotated[str, Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")]
+Ref = Annotated[str, BeforeValidator(one_line), Field(min_length=1, max_length=300)]
 
 
 class Priority(str, Enum):
@@ -42,6 +43,19 @@ class Status(str, Enum):
     needs_changes = "needs-changes"
 
 
+class Readiness(str, Enum):
+    ready = "ready"
+    after_deploy = "after-deploy"
+    waiting_decision = "waiting-decision"
+
+
+class Delivery(str, Enum):
+    local = "local"
+    pushed = "pushed"
+    pr = "pr"
+    merged = "merged"
+
+
 class Resolution(str, Enum):
     done = "done"
     needs_changes = "needs-changes"
@@ -57,11 +71,32 @@ class EventType(str, Enum):
     needs_changes = "needs-changes"
     closed = "closed"
     withdrawn = "withdrawn"
+    progress = "progress"
+    ready = "ready"
+    reopened = "reopened"
+    delivered = "delivered"
 
 
 PRIORITY_ORDER = {Priority.urgent: 0, Priority.high: 1, Priority.normal: 2, Priority.low: 3}
 OPEN_STATUSES = (Status.sent, Status.taken, Status.needs_changes)
 CLOSED_STATUSES = (Status.done, Status.rejected, Status.closed)
+UNSHIPPED = (Delivery.local, Delivery.pushed, Delivery.pr)
+
+
+class Item(BaseModel):
+    id: int = Field(examples=[1])
+    title: str = Field(examples=["Lead panel: stage history"])
+    project: str | None = Field(default=None, description="Repository this item belongs in; the report's when empty")
+    readiness: Readiness = Readiness.ready
+    done: bool = False
+    done_by: str | None = None
+    done_at: datetime | None = None
+
+
+class ItemInput(BaseModel):
+    title: Line = Field(min_length=3, max_length=200, examples=["Lead panel: stage history"])
+    project: Project | None = Field(default=None, examples=["thecargo-mobile"])
+    readiness: Readiness = Readiness.ready
 
 
 class Reply(BaseModel):
@@ -84,6 +119,16 @@ class ReportBase(BaseModel):
     due: datetime | None = None
     status: Status = Status.sent
     assignee: str | None = None
+    readiness: Readiness = Field(
+        default=Readiness.ready,
+        description="ready to work on, or waiting for a deploy (after-deploy) or a decision (waiting-decision)",
+    )
+    readiness_note: str | None = Field(default=None, examples=["after shipment#178 is on dev"])
+    delivery: Delivery | None = Field(
+        default=None,
+        description="Where the finished work is: local (uncommitted or unpushed), pushed, pr, merged",
+    )
+    related: list[int] = Field(default=[], description="Ids of reports this one continues or depends on")
     version: int = 1
     created_at: datetime
     updated_at: datetime
@@ -96,17 +141,47 @@ class ReportBase(BaseModel):
 
 class ReportRow(ReportBase):
     replies: int = 0
+    items_total: int = 0
+    items_done: int = 0
+    projects: list[str] = Field(default=[], description="Every repository the report or one of its items names")
+    items_here_total: int | None = Field(default=None, description="Items for the projects asked about")
+    items_here_done: int | None = None
+
+
+class ThreadRow(ReportRow):
+    unread: int = Field(description="Replies by others that I have not read")
+    last_reply_by: str
+    last_reply_excerpt: str
 
 
 class Report(ReportBase):
     text: str
     note: str | None = None
+    items: list[Item] = []
     replies: list[Reply] = []
     taken_at: datetime | None = None
     closed_at: datetime | None = None
+    closed_by: str | None = None
+    status_before_closing: Status | None = None
+    delivery_refs: list[str] = Field(default=[], description="Branch, PR link or commit of the finished work")
+    retention_from: datetime | None = None
 
-    def row(self) -> ReportRow:
-        return ReportRow(**self.model_dump(exclude={"replies", "text", "overdue"}), replies=len(self.replies))
+    @property
+    def projects(self) -> list[str]:
+        return list(dict.fromkeys([self.project, *(item.project for item in self.items if item.project)]))
+
+    def row(self, here: set[str] | None = None) -> ReportRow:
+        local = [item for item in self.items if (item.project or self.project) in here] if here else None
+        hidden = {"replies", "text", "overdue", "items", "status_before_closing", "delivery_refs", "retention_from"}
+        return ReportRow(
+            **self.model_dump(exclude=hidden),
+            replies=len(self.replies),
+            items_total=len(self.items),
+            items_done=sum(1 for item in self.items if item.done),
+            projects=self.projects,
+            items_here_total=len(local) if local is not None and self.items else None,
+            items_here_done=sum(1 for item in local if item.done) if local is not None and self.items else None,
+        )
 
     def sort_key(self) -> tuple:
         return (PRIORITY_ORDER[self.priority], self.due is None, self.due or self.created_at, self.created_at)
@@ -122,6 +197,10 @@ class SendRequest(BaseModel):
     due: AwareDatetime | None = Field(
         default=None, description="Deadline with a UTC offset, e.g. 2026-10-09T18:00:00+05:00"
     )
+    readiness: Readiness = Readiness.ready
+    readiness_note: Line | None = Field(default=None, max_length=200)
+    items: list[ItemInput] = Field(default=[], max_length=settings.MAX_ITEMS, description="Checklist, one line each")
+    related: list[int] = Field(default=[], max_length=10)
 
 
 class EditRequest(BaseModel):
@@ -130,6 +209,19 @@ class EditRequest(BaseModel):
     priority: Priority | None = None
     due: AwareDatetime | None = None
     clear_due: bool = False
+    readiness: Readiness | None = None
+    readiness_note: Line | None = Field(default=None, max_length=200)
+    items: list[ItemInput] | None = Field(
+        default=None,
+        max_length=settings.MAX_ITEMS,
+        description="Replaces the checklist; an item whose title is unchanged keeps its done mark",
+    )
+    related: list[int] | None = Field(default=None, max_length=10)
+
+
+class CheckRequest(BaseModel):
+    item_ids: list[int] = Field(min_length=1, max_length=settings.MAX_ITEMS, examples=[[1, 2]])
+    done: bool = True
 
 
 class ReplyRequest(BaseModel):
@@ -139,23 +231,40 @@ class ReplyRequest(BaseModel):
 class ResolveRequest(BaseModel):
     status: Resolution
     note: Line = Field(default="", max_length=1000, description="Required for needs-changes")
+    delivery: Delivery | None = Field(default=None, description="With done: where the finished work is")
+    refs: list[Ref] = Field(default=[], max_length=10, description="Branch, PR link or commit")
+    allow_open_items: bool = Field(default=False, description="Mark done although checklist items are unticked")
+
+
+class DeliveryRequest(BaseModel):
+    delivery: Delivery
+    refs: list[Ref] = Field(default=[], max_length=10, description="Branch, PR link or commit")
 
 
 class CloseRequest(BaseModel):
     note: Line = Field(default="", max_length=1000, description="Optional: why it is not needed")
 
 
+class ReopenRequest(BaseModel):
+    note: Line = Field(default="", max_length=1000, description="Optional: why it is open again")
+
+
 class InboxResponse(BaseModel):
     team: str
     user: str
     project: str | None = None
+    projects: list[str] = Field(default=[], description="The projects asked about, aliases resolved")
     waiting: int = Field(description="Reports sent to my team that nobody has taken yet")
-    waiting_for_project: int = Field(description="Of those, the ones for the requested project")
+    waiting_for_project: int = Field(description="Of those, the ones that name one of the requested projects")
     overdue: int
     taken_by_me: int
     returned: int = Field(description="Reports I sent that came back as needs-changes")
-    rows: list[ReportRow] = Field(description="My team's open reports, most pressing first")
+    rows: list[ReportRow] = Field(description="My team's open reports that I have not hidden, most pressing first")
     returned_rows: list[ReportRow]
+    hidden: int = Field(default=0, description="Open reports of my team that I hid from my own view")
+    hidden_rows: list[ReportRow] = []
+    unread_replies: int = Field(default=0, description="Unread replies on reports I sent, hold or am named in")
+    threads: list[ThreadRow] = Field(default=[], description="Those reports, newest reply first")
 
 
 class Event(BaseModel):

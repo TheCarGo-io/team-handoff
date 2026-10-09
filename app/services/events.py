@@ -74,9 +74,23 @@ class EventHub:
             if subscriber.wants(event):
                 self.push(subscriber, subscriber.payload(event))
 
-    def resync(self) -> None:
+    def resync(self, user: str | None = None) -> None:
         for subscriber in list(self.subscribers):
-            self.push(subscriber, RESYNC)
+            if user is None or subscriber.user.name == user:
+                self.push(subscriber, RESYNC)
+
+    async def refresh_user(self, user: str) -> None:
+        try:
+            await self.redis.publish(key("events"), json.dumps({"refresh_user": user}))
+        except Exception:
+            logger.exception("refresh for %s was not published", user)
+
+    def receive(self, raw: str) -> None:
+        message = json.loads(raw)
+        if "refresh_user" in message:
+            self.resync(message["refresh_user"])
+        else:
+            self.deliver(Event.model_validate(message))
 
     def close(self) -> None:
         self.closing = True
@@ -97,7 +111,7 @@ class EventHub:
                         if message is None:
                             await pubsub.ping()
                         elif message["type"] == "message":
-                            self.deliver(Event.model_validate_json(message["data"]))
+                            self.receive(message["data"])
             except asyncio.CancelledError:
                 raise
             except Exception:

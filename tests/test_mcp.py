@@ -41,7 +41,21 @@ async def test_tools_are_listed(client, tokens, running):
     payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
     response = await client.post("/mcp/", json=payload, headers={**HEADERS, **tokens["ali"]})
     names = sorted(tool["name"] for tool in response.json()["result"]["tools"])
-    assert names == ["board", "close", "edit", "get", "inbox", "reply", "resolve", "send", "take", "withdraw"]
+    assert names == [
+        "board",
+        "check",
+        "close",
+        "delivered",
+        "edit",
+        "get",
+        "inbox",
+        "reopen",
+        "reply",
+        "resolve",
+        "send",
+        "take",
+        "withdraw",
+    ]
 
 
 async def test_nothing_is_served_without_a_valid_token(client, tokens, running):
@@ -92,11 +106,84 @@ async def test_tools_enforce_the_same_limits_as_the_rest_api(client, tokens, run
     assert "to_user" not in stored and "due" not in stored
 
 
+async def test_checklist_and_readiness_through_tools(client, tokens, running):
+    arguments = {
+        **report_body(),
+        "items": [{"title": "Stage history panel"}, {"title": "Response time chart", "readiness": "after-deploy"}],
+        "readiness": "after-deploy",
+        "readiness_note": "after crm#39 is on dev",
+    }
+    sent = json.loads((await call(client, tokens["asliddin"], "send", arguments))["content"][0]["text"])
+    assert sent["items_total"] == 2 and sent["readiness"] == "after-deploy"
+
+    not_ready = await call(client, tokens["ali"], "take", {})
+    assert not_ready["isError"] is True and "Nothing ready" in not_ready["content"][0]["text"]
+
+    ticked = await call(client, tokens["ali"], "check", {"report_id": sent["id"], "item_ids": [1]})
+    progress = json.loads(ticked["content"][0]["text"])
+    assert progress["items_done"] == 1 and [item["done"] for item in progress["items"]] == [True, False]
+
+    edit = {
+        "report_id": sent["id"],
+        "readiness": "ready",
+        "items": [{"title": "Stage history panel"}, {"title": "New one"}],
+    }
+    ready = json.loads((await call(client, tokens["asliddin"], "edit", edit))["content"][0]["text"])
+    assert ready["readiness"] == "ready" and ready["items_done"] == 1 and "readiness_note" not in ready
+    assert json.loads((await call(client, tokens["ali"], "take", {}))["content"][0]["text"])["id"] == sent["id"]
+
+
+async def test_done_needs_ticked_items_or_an_explicit_override_and_records_delivery(client, tokens, running):
+    arguments = {
+        **report_body(),
+        "items": [{"title": "Web page"}, {"title": "Pay page", "project": "thecargo-invoice"}],
+    }
+    sent = json.loads((await call(client, tokens["asliddin"], "send", arguments))["content"][0]["text"])
+    assert sent["projects"] == ["thecargo-frontend", "thecargo-invoice"]
+
+    refused = await call(client, tokens["ali"], "resolve", {"report_id": sent["id"], "status": "done"})
+    assert refused["isError"] is True and "unticked checklist item(s): 1, 2" in refused["content"][0]["text"]
+
+    await call(client, tokens["ali"], "check", {"report_id": sent["id"], "item_ids": [1]})
+    forced = {"report_id": sent["id"], "status": "done", "allow_open_items": True, "delivery": "local"}
+    done = json.loads((await call(client, tokens["ali"], "resolve", forced))["content"][0]["text"])
+    assert (done["status"], done["delivery"], done["items_done"]) == ("done", "local", 1)
+
+    update = {"report_id": sent["id"], "delivery": "pr", "refs": ["https://github.com/TheCarGo-io/x/pull/9"]}
+    moved = json.loads((await call(client, tokens["ali"], "delivered", update))["content"][0]["text"])
+    assert moved["delivery"] == "pr"
+
+
+async def test_get_reports_new_replies_once_and_tool_calls_are_logged(client, tokens, running, caplog):
+    caplog.set_level("INFO", logger="handoff.audit")
+    sent = json.loads((await call(client, tokens["asliddin"], "send", dict(report_body())))["content"][0]["text"])
+    await call(client, tokens["ali"], "reply", {"report_id": sent["id"], "text": "which fields?"})
+
+    first = json.loads((await call(client, tokens["asliddin"], "get", {"report_id": sent["id"]}))["content"][0]["text"])
+    again = json.loads((await call(client, tokens["asliddin"], "get", {"report_id": sent["id"]}))["content"][0]["text"])
+    assert len(first["new_reply_ids"]) == 1 and again["new_reply_ids"] == []
+
+    await call(client, tokens["asliddin"], "take", {"report_id": sent["id"]})
+    lines = [record.getMessage() for record in caplog.records]
+    assert f"tool=get report={sent['id']} by=backend/asliddin ok" in lines
+    assert any(line.startswith(f"tool=take report={sent['id']} by=backend/asliddin failed: Report") for line in lines)
+
+
 async def test_close_through_tools(client, tokens, running):
     sent = await call(client, tokens["asliddin"], "send", dict(report_body()))
     report_id = json.loads(sent["content"][0]["text"])["id"]
     closed = await call(client, tokens["dana"], "close", {"report_id": report_id})
     assert json.loads(closed["content"][0]["text"])["status"] == "closed"
+
+
+async def test_reopen_through_tools(client, tokens, running):
+    sent = await call(client, tokens["asliddin"], "send", dict(report_body()))
+    report_id = json.loads(sent["content"][0]["text"])["id"]
+    await call(client, tokens["ali"], "close", {"report_id": report_id})
+    refused = await call(client, tokens["dana"], "reopen", {"report_id": report_id})
+    assert refused["isError"] is True
+    reopened = await call(client, tokens["asliddin"], "reopen", {"report_id": report_id, "note": "still needed"})
+    assert json.loads(reopened["content"][0]["text"])["status"] == "sent"
 
 
 async def test_withdraw_through_tools(client, tokens, running):

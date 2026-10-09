@@ -202,3 +202,99 @@ async def test_withdrawing_tells_the_holder(client, tokens, hub):
     await client.delete(f"/api/v1/reports/{report['id']}", headers=tokens["asliddin"])
     event = await next_event(holder)
     assert event["type"] == "withdrawn" and event["notify"] is True
+
+
+async def test_ticking_items_tells_the_sender_the_progress_once(client, tokens, hub):
+    body = report_body(items=[{"title": "Stage history panel"}, {"title": "Response time chart"}])
+    report = (await client.post("/api/v1/reports", json=body, headers=tokens["asliddin"])).json()
+    await asyncio.sleep(0.05)
+    sender = hub.subscribe(User(name="asliddin", team="backend"))
+    url = f"/api/v1/reports/{report['id']}/items/check"
+
+    await client.post(url, json={"item_ids": [2]}, headers=tokens["ali"])
+    await client.post(url, json={"item_ids": [2]}, headers=tokens["ali"])
+
+    event = await next_event(sender)
+    assert event["type"] == "progress" and event["notify"] is True
+    assert event["note"] == "1/2 done; done: Response time chart"
+    await asyncio.sleep(0.05)
+    assert sender.queue.empty()
+
+
+async def test_becoming_ready_is_announced_as_ready_not_as_an_edit(client, tokens, hub):
+    body = report_body(readiness="after-deploy", items=[{"title": "Chart", "readiness": "after-deploy"}])
+    report = (await client.post("/api/v1/reports", json=body, headers=tokens["asliddin"])).json()
+    await client.post(f"/api/v1/reports/{report['id']}/take", headers=tokens["ali"])
+    await asyncio.sleep(0.05)
+    holder = hub.subscribe(User(name="ali", team="frontend"))
+    url = f"/api/v1/reports/{report['id']}"
+
+    await client.patch(url, json={"readiness": "ready"}, headers=tokens["asliddin"])
+    assert (await next_event(holder))["type"] == "edited"
+
+    change = {"items": [{"title": "Chart"}], "readiness_note": "live on dev"}
+    await client.patch(url, json=change, headers=tokens["asliddin"])
+    event = await next_event(holder)
+    assert event["type"] == "ready" and event["notify"] is True and event["note"] == "live on dev"
+
+
+async def test_hiding_refreshes_only_my_own_sessions(client, tokens, hub):
+    report = (await client.post("/api/v1/reports", json=report_body(), headers=tokens["asliddin"])).json()
+    await asyncio.sleep(0.05)
+    mine = hub.subscribe(User(name="ali", team="frontend"))
+    other_tab = hub.subscribe(User(name="ali", team="frontend"))
+    teammate = hub.subscribe(User(name="vali", team="frontend"))
+
+    await client.post(f"/api/v1/reports/{report['id']}/hide", headers=tokens["ali"])
+
+    assert await next_event(mine) == {"type": "resync", "notify": False}
+    assert await next_event(other_tab) == {"type": "resync", "notify": False}
+    await asyncio.sleep(0.05)
+    assert teammate.queue.empty()
+
+
+async def test_reopening_tells_the_sender_the_holder_and_the_closer(client, tokens, hub):
+    report = (await client.post("/api/v1/reports", json=report_body(), headers=tokens["asliddin"])).json()
+    await client.post(f"/api/v1/reports/{report['id']}/take", headers=tokens["ali"])
+    await client.post(f"/api/v1/reports/{report['id']}/close", headers=tokens["vali"])
+    await asyncio.sleep(0.05)
+    sender = hub.subscribe(User(name="asliddin", team="backend"))
+    holder = hub.subscribe(User(name="ali", team="frontend"))
+    closer = hub.subscribe(User(name="vali", team="frontend"))
+
+    await client.post(f"/api/v1/reports/{report['id']}/reopen", json={"note": "by mistake"}, headers=tokens["asliddin"])
+
+    for watcher, notified in ((sender, False), (holder, True), (closer, True)):
+        event = await next_event(watcher)
+        assert event["type"] == "reopened" and event["notify"] is notified and event["note"] == "by mistake"
+
+
+async def test_reading_replies_refreshes_my_other_sessions_and_delivery_tells_the_sender(client, tokens, hub):
+    report = (await client.post("/api/v1/reports", json=report_body(), headers=tokens["asliddin"])).json()
+    rid = report["id"]
+    await client.post(f"/api/v1/reports/{rid}/replies", json={"text": "question"}, headers=tokens["ali"])
+    await asyncio.sleep(0.05)
+    sender = hub.subscribe(User(name="asliddin", team="backend"))
+
+    await client.get(f"/api/v1/reports/{rid}?mark_seen=true", headers=tokens["asliddin"])
+    assert await next_event(sender) == {"type": "resync", "notify": False}
+
+    body = {"status": "done", "delivery": "local"}
+    await client.post(f"/api/v1/reports/{rid}/resolve", json=body, headers=tokens["ali"])
+    assert (await next_event(sender))["type"] == "done"
+    body = {"delivery": "pr", "refs": ["https://github.com/TheCarGo-io/thecargo-frontend/pull/9"]}
+    await client.post(f"/api/v1/reports/{rid}/delivery", json=body, headers=tokens["ali"])
+    event = await next_event(sender)
+    assert event["type"] == "delivered" and event["notify"] is True
+    assert event["note"] == "pr https://github.com/TheCarGo-io/thecargo-frontend/pull/9"
+
+
+async def test_a_reply_reaches_the_person_the_report_is_addressed_to(client, tokens, hub):
+    body = report_body(to_user="vali")
+    report = (await client.post("/api/v1/reports", json=body, headers=tokens["asliddin"])).json()
+    await asyncio.sleep(0.05)
+    named = hub.subscribe(User(name="vali", team="frontend"))
+    body = {"text": "one more thing"}
+    await client.post(f"/api/v1/reports/{report['id']}/replies", json=body, headers=tokens["asliddin"])
+    event = await next_event(named)
+    assert event["type"] == "reply" and event["notify"] is True

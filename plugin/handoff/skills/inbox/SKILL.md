@@ -1,10 +1,17 @@
 ---
-description: Show my team's handoff inbox — reports waiting, in progress, overdue, and ones returned to me
-allowed-tools: mcp__plugin_handoff_handoff__inbox, Bash(git remote get-url origin)
+description: Show my handoff inbox: replies for me, reports waiting, in progress, overdue, returned
+allowed-tools: mcp__plugin_handoff_handoff__inbox
 ---
 
-Call the handoff `inbox` tool with `project` set to this repository's name (the last path segment of `git remote get-url origin`, without `.git`).
+Call the handoff `inbox` tool with `projects` set to this session's projects.
 
-Show the rows as one compact table in the order returned: id, priority, status (with assignee), project, from, title, due. Show `due` in the user's local time and mark overdue rows. Put reports for this project first if the user is clearly working on it. Then list `returned_rows` (reports the user sent that came back as needs-changes) separately.
+A "Handoff context from the plugin" block comes with this prompt: the user, their team, this session's project or projects, what is waiting, what the user holds and which reports have unread replies. Use it instead of looking those up. If the block is missing, call `inbox` first.
 
-Do not open or take any report. End with one line: how many wait for this project and `/handoff:take <id|next>`.
+Show, in this order and leaving out empty parts:
+1. **Replies for you** (`threads`): id, title, who replied, the excerpt.
+2. **Waiting here**: rows that name one of this session's projects.
+3. **Waiting elsewhere**.
+4. **In progress**: holder and checklist progress (`items_here_done/items_here_total` when given, else `items_done/items_total`).
+5. **Returned to you** (`returned_rows`).
+
+One compact table per part: id, priority, project(s), from, title, due in the user's local time, readiness when not ready. Mark overdue rows. Leave `hidden_rows` out unless asked. Do not open or take anything. End with one line naming the next sensible command, for example `/handoff:take <id>` for a reply or `/handoff:take next`.

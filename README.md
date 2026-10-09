@@ -20,13 +20,32 @@ sent ──take──▶ taken ──done──────────▶ done 
   │               └──needs-changes────▶ back to the sender ──edit (version+1)──▶ sent
   ├── done / needs-changes are also allowed straight from sent
   └── close, from any open status, by anyone ──▶ closed  (kept 48 h, then deleted)
+  closed / done ──reopen (sender, holder or closer, within the 48 h)──▶ the status it had
 ```
 
 An open report is deleted after `OPEN_TTL_DAYS` (7) without any change. Only one person can hold a report:
 `take` is atomic. The sender can withdraw a report at any time, which deletes it for everyone; an edit replaces
 the text and the old text is not kept.
 
-Limits: 20 000 characters of text, 50 replies of 4 000 characters, 60 changes per user per minute (429), and
+A report can carry a checklist (`items`, up to 30): the receiving team ticks items in the pane or with
+`/handoff:check`, and the sender sees the progress. A report and each item also carry a readiness: `ready`,
+`after-deploy` (what it depends on is not live yet) or `waiting-decision`. `take next` skips reports that are
+not ready; when the sender marks the last waiting part ready, the receiver is told.
+
+Projects: `project` is the main repository; a checklist item can name another one, so one report covers a
+change that touches web, mobile and desktop. A session asks for its own projects (`?project=` repeated; a
+folder that is not a repository counts the repositories inside it) and gets `waiting_for_project` and per-row
+`items_here_*`. `PROJECT_ALIASES` maps other spellings (`mobile`, a renamed repository) to the canonical name.
+
+Replies: `inbox.threads` lists reports with replies I have not read, for anyone involved (sender, holder,
+addressee, earlier repliers), on closed reports too. Reading a report with `mark_seen=true` or through the
+`get` tool marks them read in all my sessions.
+
+Done: `resolve` with `done` is refused while checklist items are unticked unless `allow_open_items` is set, and
+records `delivery` (`local`, `pushed`, `pr`, `merged`) with `refs`. A done report whose work is not merged yet
+is kept like an open one; `POST /reports/{id}/delivery` updates it and tells the sender. `related` links reports.
+
+Limits: 60 000 characters of text, 50 replies of 20 000 characters, 60 changes per user per minute (429), and
 20 open event streams per user. `due` must carry a UTC offset. Set `PROJECTS` to refuse unknown project names.
 
 ## Run the server
@@ -72,14 +91,18 @@ Claude Code: the notification module uses the hooks-module API (written against 
 | `/handoff:send <team> [@person] …` | Writes the report from the session's work and sends it |
 | `/handoff:inbox` | My team's queue, most pressing first |
 | `/handoff:board [project]` | Every report of every team |
-| `/handoff:take <id [id …] \| next \| all>` | Takes one or several reports in this session, checks each against the code, proposes one plan |
+| `/handoff:take <id [id …] \| next \| all>` | Takes one or several reports in this session, checks each against the code, proposes one plan. On a report I sent or cannot take, it picks up the unread replies instead |
+| `/handoff:status [project]` | What is happening where: reports grouped by project, who holds what, what is built but not merged |
 | `/handoff:reply <id> <message>` | Question or answer under a report |
-| `/handoff:done <id> [note]` | Marks it done |
+| `/handoff:done <id> [note]` | Ticks finished items, records where the work is (local, pushed, PR, merged) and marks it done |
+| `/handoff:check <id> <item numbers>` | Ticks checklist items of a report my team received |
+| `/handoff:ready <id> [items] [note]` | Tells the receiver a waiting report I sent can now be worked on |
 | `/handoff:close <id> [note]` | Closes a report nobody needs. Anyone can, no reason required |
+| `/handoff:reopen <id> [reason]` | Reopens a closed or done report within its 48 hours (sender, holder or closer) |
 | `/handoff:return <id> <what to change>` | Hands it back to the sender as needs-changes |
 | `/handoff:edit <id> <change>` | Updates a report I sent; the receiver is notified |
 | `/handoff:withdraw <id>` | Deletes a report I sent, for everyone |
-| `/handoffs` | Opens the inbox in a side pane: Read a report in full (text and replies), Take, Continue, Fix, Reply, Done, Close (press twice, no model call). Tick `[ ]` on several rows and press "Take N selected" to take them together. Listing and reading cost no tokens and do not take the report |
+| `/handoffs` | Opens the inbox in a side pane: Read a report in full (text and replies), Take, Continue, Fix, Reply, Done, Close (press twice, no model call). Tick `[ ]` on several rows and press "Take N selected" to take them together. `hide` removes a report from your own list and counts only (it stays where it is for everyone else, and sits under "hidden from your list"); Close ends it for everyone, is not offered on a report a teammate holds, and can be undone from the pane or with `/handoff:reopen`. Listing and reading cost no tokens and do not take the report |
 
 Notifications cost no tokens: the plugin holds one `curl` stream to `/api/v1/events` per interactive session
 and draws a toast and a line above the prompt; both can be switched off in `/config`. With the line switched
@@ -94,8 +117,10 @@ a report taken on this machine says which project's session took it.
 If the stream drops, or goes silent for 60 s (sleep, VPN change), it reconnects with backoff and re-reads the
 inbox; it also re-reads every 10 minutes. The server URL must have no trailing slash.
 
-`project` on a report is the repository the work belongs in. The plugin reads the current repository name from
-`git remote get-url origin` and shows how many reports wait for it.
+The plugin reads the session's project from `git remote get-url origin`; in a folder that is not a repository
+it takes the repositories inside it. It shows how many reports wait for those, and attaches the user, team,
+projects and open report ids as context to every `/handoff:` command, so the skills do not look them up.
+Unread replies show under "Replies for you" in every session until read; Take on one hands the thread to Claude.
 
 ## Plugin development
 

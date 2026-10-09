@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Detail, HandoffEvent, Inbox, Row, View } from '../types'
+import type { Detail, HandoffEvent, Inbox, Readiness, Row, Thread, View } from '../types'
 
 const PANE = 'handoffs'
 const SAFETY_REFRESH_MS = 600000
@@ -9,7 +9,9 @@ const EMPTY: Inbox = {
   isLoaded: false,
   isOffline: false,
   user: '',
+  team: '',
   project: '',
+  projects: [],
   waiting: 0,
   waitingForProject: 0,
   overdue: 0,
@@ -17,10 +19,13 @@ const EMPTY: Inbox = {
   returned: 0,
   rows: [],
   returnedRows: [],
+  hiddenRows: [],
+  unreadReplies: 0,
+  threads: [],
 }
 const inbox = atom({ plugin: 'handoff', key: 'inbox' } as const, EMPTY)
 
-const LIST: View = { id: null, detail: null, problem: '' }
+const LIST: View = { id: null, detail: null, problem: '', fresh: 0 }
 const TAKE_TOOL = /^mcp__.*handoff.*__take$/
 const latest = atom({ plugin: 'handoff', key: 'latest' } as const, null)
 const view = atom({ plugin: 'handoff', key: 'view' } as const, LIST)
@@ -28,11 +33,31 @@ const seenBefore = atom({ plugin: 'handoff', key: 'seenBefore' } as const, 0)
 const places = atom({ plugin: 'handoff', key: 'places' } as const, {})
 const confirming = atom({ plugin: 'handoff', key: 'confirming' } as const, null)
 const selected = atom({ plugin: 'handoff', key: 'selected' } as const, [])
+const showHidden = atom({ plugin: 'handoff', key: 'showHidden' } as const, false)
+const lastClosed = atom({ plugin: 'handoff', key: 'lastClosed' } as const, null)
 
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`
 const printable = (text: string) => text.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ')
 const readable = (text: string) => text.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]+/g, '')
 const PRIORITY_COLOR = { urgent: 'error', high: 'warning', normal: 'text', low: 'inactive' } as const
+const DELIVERY = {
+  none: '',
+  local: 'on their machine only, not pushed',
+  pushed: 'pushed to a branch',
+  pr: 'in a pull request',
+  merged: 'merged',
+} as const
+const WAITS: Record<Readiness, string> = {
+  ready: '',
+  'after-deploy': 'not live yet',
+  'waiting-decision': 'waiting on a decision',
+}
+
+export const describeReadiness = (readiness: Readiness | undefined, note?: string | null): string => {
+  const label = WAITS[readiness ?? 'ready']
+
+  return label === '' ? '' : note ? `${label}: ${note}` : label
+}
 
 export const describeEvent = (event: HandoffEvent): string => {
   const who = `${event.by_team}/${event.by_user}`
@@ -51,6 +76,14 @@ export const describeEvent = (event: HandoffEvent): string => {
       return `Handoff #${event.id} sent back by ${who}${note}`
     case 'withdrawn':
       return `Handoff #${event.id} withdrawn by ${who}: ${event.title}`
+    case 'progress':
+      return `Handoff #${event.id}: ${event.note} (${who})`
+    case 'ready':
+      return `Handoff #${event.id} is ready to work on${note} (${who})`
+    case 'delivered':
+      return `Handoff #${event.id} delivery update by ${who}${note}`
+    case 'reopened':
+      return `Handoff #${event.id} reopened by ${who}${note || `: ${event.title}`}`
     case 'closed':
       return `Handoff #${event.id} closed by ${who}${note || `: ${event.title}`}`
     default:
@@ -94,6 +127,10 @@ export const summarize = (box: Inbox): string | undefined => {
     parts.push(`${box.returned} returned`)
   }
 
+  if (box.unreadReplies > 0) {
+    parts.push(`${box.unreadReplies} unread ${box.unreadReplies === 1 ? 'reply' : 'replies'}`)
+  }
+
   return parts.length > 0 ? parts.join(' · ') : undefined
 }
 
@@ -102,6 +139,39 @@ export const projectOf = (remote: string, cwd: string): string => {
   const name = source.replace(/[/\\]+$/, '').split(/[/\\:]/).pop() ?? ''
 
   return name.replace(/\.git$/, '')
+}
+
+export const projectsOf = (remote: string, children: string, cwd: string): string[] => {
+  if (remote.trim() !== '') {
+    return [projectOf(remote, cwd)]
+  }
+
+  const names = children
+    .split('\n')
+    .map(line => projectOf(line, line))
+    .filter(name => name !== '')
+
+  return names.length > 0 ? [...new Set(names)].slice(0, 150) : [projectOf('', cwd)]
+}
+
+const WORKSPACE_SCAN =
+  'for d in */; do [ -e "$d.git" ] && { git -C "$d" remote get-url origin 2>/dev/null || echo "$d"; }; done'
+
+export const describeContext = (box: Inbox): string => {
+  const mine = (row: Row) => (row.projects ?? [row.project]).some(name => box.projects.includes(name))
+  const brief = (row: Row) => `#${row.id} "${row.title}" (${(row.projects ?? [row.project]).join(', ')})`
+  const waiting = box.rows.filter(row => row.status === 'sent')
+  const lines = [
+    'Handoff context from the plugin, current as of this prompt (use it instead of looking these up):',
+    `- user ${box.user}, team ${box.team}`,
+    `- this session's ${box.projects.length === 1 ? 'project' : 'projects (a workspace of repositories)'}: ${box.projects.join(', ')}`,
+    `- waiting for these projects: ${waiting.filter(mine).map(brief).join('; ') || 'none'}`,
+    `- waiting for other projects: ${waiting.filter(row => !mine(row)).map(brief).join('; ') || 'none'}`,
+    `- held by ${box.user}: ${box.rows.filter(row => row.status === 'taken' && row.assignee === box.user).map(brief).join('; ') || 'none'}`,
+    `- unread replies: ${box.threads.map(thread => `#${thread.id} (${thread.unread} from ${thread.last_reply_by})`).join('; ') || 'none'}`,
+  ]
+
+  return lines.join('\n')
 }
 
 export const configProblem = (url: string, token: string): string | undefined => {
@@ -120,7 +190,11 @@ export const configProblem = (url: string, token: string): string | undefined =>
   return undefined
 }
 
-const draftSkill = async ($: EngineInterface, skill: 'take' | 'edit' | 'reply' | 'done', ids: number | number[]) => {
+const draftSkill = async (
+  $: EngineInterface,
+  skill: 'take' | 'edit' | 'reply' | 'done' | 'reopen',
+  ids: number | number[],
+) => {
   const command = `/handoff:${skill} ${(Array.isArray(ids) ? ids : [ids]).join(' ')} `
   const box = await $.prompt.read().catch(() => ({ text: '' }))
 
@@ -152,13 +226,25 @@ const openPane = async ($: EngineInterface) => {
 }
 
 const readReport = async ($: EngineInterface, id: number) => {
-  await update($, view, () => ({ id, detail: null, problem: '' }))
-  const answer = api && (await $.http.fetch(`${api.base}/api/v1/reports/${id}`, { headers: api.headers }).catch(() => undefined))
+  const fresh = (await read($, inbox)).threads.find(thread => thread.id === id)?.unread ?? 0
+  await update($, view, () => ({ id, detail: null, problem: '', fresh }))
+  const answer =
+    api &&
+    (await $.http.fetch(`${api.base}/api/v1/reports/${id}?mark_seen=true`, { headers: api.headers }).catch(() => undefined))
   const shown: View =
     answer?.ok === true
-      ? { id, detail: JSON.parse(answer.text) as Detail, problem: '' }
-      : { id, detail: null, problem: answer?.status === 404 ? 'This report no longer exists.' : 'Could not load the report.' }
+      ? { id, detail: JSON.parse(answer.text) as Detail, problem: '', fresh }
+      : {
+          id,
+          detail: null,
+          problem: answer?.status === 404 ? 'This report no longer exists.' : 'Could not load the report.',
+          fresh: 0,
+        }
   await update($, view, current => (current.id === id ? shown : current))
+
+  if (fresh > 0) {
+    void refreshNow?.()
+  }
 }
 
 const pressClose = async ($: EngineInterface, id: number) => {
@@ -184,11 +270,66 @@ const pressClose = async ($: EngineInterface, id: number) => {
     const reason = answer?.status === 409 ? 'it is already closed' : answer?.status === 404 ? 'it no longer exists' : 'the server did not answer'
     $.ui.toast(`Could not close #${id}: ${reason}`, { timeoutMs: 6000 })
   } else {
-    $.ui.toast(`Closed #${id}`)
+    $.ui.toast(`Closed #${id} for everyone. Undo is in the handoff pane.`, { timeoutMs: 6000 })
+    await update($, lastClosed, () => id)
     await update($, view, shown => (shown.id === id ? LIST : shown))
   }
 
   await refreshNow?.()
+}
+
+const post = async ($: EngineInterface, path: string, method = 'POST') =>
+  api &&
+  (await $.http
+    .fetch(`${api.base}/api/v1/reports/${path}`, {
+      method,
+      headers: { ...api.headers, 'content-type': 'application/json' },
+      body: method === 'POST' ? '{}' : undefined,
+    })
+    .catch(() => undefined))
+
+const pressUndo = async ($: EngineInterface, id: number) => {
+  const answer = await post($, `${id}/reopen`)
+
+  if (answer?.ok === true) {
+    $.ui.toast(`Reopened #${id}`)
+  } else {
+    $.ui.toast(`Could not reopen #${id}. Try /handoff:reopen ${id}`, { timeoutMs: 6000 })
+  }
+
+  await update($, lastClosed, () => null)
+  await refreshNow?.()
+}
+
+const pressHide = async ($: EngineInterface, id: number, isHidden: boolean) => {
+  const answer = await post($, `${id}/hide`, isHidden ? 'POST' : 'DELETE')
+
+  if (answer?.ok !== true) {
+    $.ui.toast(`Could not ${isHidden ? 'hide' : 'show'} #${id}: the server did not answer`, { timeoutMs: 6000 })
+  }
+
+  await refreshNow?.()
+}
+
+const pressCheck = async ($: EngineInterface, id: number, item: number, isDone: boolean) => {
+  const answer =
+    api &&
+    (await $.http
+      .fetch(`${api.base}/api/v1/reports/${id}/items/check`, {
+        method: 'POST',
+        headers: { ...api.headers, 'content-type': 'application/json' },
+        body: JSON.stringify({ item_ids: [item], done: isDone }),
+      })
+      .catch(() => undefined))
+
+  if (answer?.ok === true) {
+    const fresh = JSON.parse(answer.text) as Detail
+    await update($, view, shown => (shown.id === id ? { ...shown, detail: fresh } : shown))
+    void refreshNow?.()
+  } else {
+    const reason = answer?.status === 403 ? 'only the receiving team ticks items' : 'the server refused'
+    $.ui.toast(`Could not update item ${item} of #${id}: ${reason}`, { timeoutMs: 6000 })
+  }
 }
 
 export const register: Register = (on, options) => {
@@ -229,6 +370,7 @@ export const register: Register = (on, options) => {
     const headers = { Authorization: `Bearer ${token}` }
     api = { base, headers }
     let project = ''
+    let projects: string[] = []
     let locatedIn = ''
     let isRejected = false
     let isRefreshing = false
@@ -239,17 +381,21 @@ export const register: Register = (on, options) => {
 
       if (cwd !== locatedIn) {
         const remote = await $.process.run(['git', 'remote', 'get-url', 'origin'], { cwd }).catch(() => ({ stdout: '' }))
+        const children =
+          remote.stdout.trim() === ''
+            ? await $.process.run(['sh', '-c', WORKSPACE_SCAN], { cwd }).catch(() => ({ stdout: '' }))
+            : { stdout: '' }
         locatedIn = cwd
-        project = projectOf(remote.stdout, cwd)
+        projects = projectsOf(remote.stdout, children.stdout, cwd)
+        project = projects.length === 1 ? (projects[0] ?? '') : projectOf('', cwd)
         here = project
       }
     }
 
     const load = async () => {
       await locate()
-      const answer = await $.http
-        .fetch(`${base}/api/v1/inbox?project=${encodeURIComponent(project)}`, { headers })
-        .catch(() => undefined)
+      const query = projects.map(name => `project=${encodeURIComponent(name)}`).join('&')
+      const answer = await $.http.fetch(`${base}/api/v1/inbox?${query}`, { headers }).catch(() => undefined)
 
       if (answer === undefined) {
         await update($, inbox, box => ({ ...box, isOffline: true }))
@@ -274,6 +420,10 @@ export const register: Register = (on, options) => {
 
       const body = JSON.parse(answer.text) as {
         user: string
+        team: string
+        projects?: string[]
+        unread_replies?: number
+        threads?: Thread[]
         waiting: number
         waiting_for_project: number
         overdue: number
@@ -281,12 +431,15 @@ export const register: Register = (on, options) => {
         returned: number
         rows: Row[]
         returned_rows: Row[]
+        hidden_rows?: Row[]
       }
       const fresh: Inbox = {
         isLoaded: true,
         isOffline: false,
         user: body.user,
+        team: body.team,
         project,
+        projects: body.projects && body.projects.length > 0 ? body.projects : projects,
         waiting: body.waiting,
         waitingForProject: body.waiting_for_project,
         overdue: body.overdue,
@@ -294,12 +447,18 @@ export const register: Register = (on, options) => {
         returned: body.returned,
         rows: body.rows.slice(0, 50),
         returnedRows: body.returned_rows.slice(0, 20),
+        hiddenRows: (body.hidden_rows ?? []).slice(0, 50),
+        unreadReplies: body.unread_replies ?? 0,
+        threads: (body.threads ?? []).slice(0, 20),
       }
       isRejected = false
       await update($, inbox, () => fresh)
-      await update($, latest, shown =>
-        shown?.type === 'new' && !body.rows.some(row => row.id === shown.id && row.status === 'sent') ? null : shown,
-      )
+      await update($, latest, shown => {
+        const isTakenNow = shown?.type === 'new' && !body.rows.some(row => row.id === shown.id && row.status === 'sent')
+        const isReadNow = shown?.type === 'reply' && !fresh.threads.some(thread => thread.id === shown.id)
+
+        return isTakenNow || isReadNow ? null : shown
+      })
       const summary = summarize(fresh)
       $.ui.status(options.band === false && summary !== undefined ? `${summary} · /handoffs` : undefined)
     }
@@ -397,6 +556,14 @@ export const register: Register = (on, options) => {
     return started
   })
 
+  on('prompt.submit', async ($, e, next) => {
+    const box = await read($, inbox)
+
+    return e.text.trimStart().startsWith('/handoff:') && box.isLoaded
+      ? next({ ...e, context: [...(e.context ?? []), describeContext(box)] })
+      : next(e)
+  }).catch(($, e, next) => next(e))
+
   on('command.run', { command: PANE }, async $ => {
     await openPane($)
 
@@ -423,6 +590,7 @@ export const register: Register = (on, options) => {
         box.takenByMe > 0 ? `${box.takenByMe} in progress` : '',
         box.returned > 0 ? `${box.returned} returned` : '',
       ].filter(part => part !== '')
+      const replies = box.unreadReplies === 1 ? '1 unread reply' : `${box.unreadReplies} unread replies`
 
       return (
         <Box flexDirection="column">
@@ -432,9 +600,14 @@ export const register: Register = (on, options) => {
             </Text>
             {box.waitingForProject > 0 && <Text bold>{box.waitingForProject} here</Text>}
             {rest.length > 0 && <Text dimColor>{(box.waitingForProject > 0 ? '· ' : '') + rest.join(' · ')}</Text>}
+            {box.unreadReplies > 0 && (
+              <Text color="success" bold>
+                · {replies}
+              </Text>
+            )}
             {box.overdue > 0 && <Text color="error">· {box.overdue} overdue</Text>}
             {box.isOffline && <Text color="error">· offline, last known</Text>}
-            <Button key="open" label="Open" hotkey="o" dimColor onPress={open} />
+            <Button key="open" label="Open" hotkey="o" dimColor={box.unreadReplies === 0} onPress={open} />
           </Box>
           {beneath}
         </Box>
@@ -456,8 +629,13 @@ export const register: Register = (on, options) => {
           </Text>
           <Text wrap="truncate-end">{printable(describeEvent(event))}</Text>
           {event.type !== 'withdrawn' && <Button key="read" label="Read" hotkey="r" variant="primary" onPress={peek} />}
-          {isNew && <Button key="take" label={`Take #${event.id}`} hotkey="t" onPress={take} />}
-          <Button key="hide" label="Hide" hotkey="h" dimColor role="dismiss" onPress={() => void update($, latest, () => null)} />
+          {(isNew || event.type === 'reply') && (
+            <Button key="take" label={isNew ? `Take #${event.id}` : 'Take reply'} hotkey="t" onPress={take} />
+          )}
+          {(event.type === 'closed' || event.type === 'done') && event.from_user === box.user && (
+            <Button key="reopen" label="Reopen" hotkey="u" onPress={() => void draftSkill($, 'reopen', event.id)} />
+          )}
+          <Button key="dismiss" label="Dismiss" hotkey="d" dimColor role="dismiss" onPress={() => void update($, latest, () => null)} />
         </Box>
         {beneath}
       </Box>
@@ -483,8 +661,14 @@ export const register: Register = (on, options) => {
     const armed = await read($, confirming)
     const picked = await read($, selected)
     const isMine = (row: Row) => row.status === 'taken' && row.assignee === box.user
+    const isHere = (row: Row) => (row.projects ?? [row.project]).some(name => box.projects.includes(name))
+    const hereLabel = box.projects.length > 1 ? `this workspace (${box.projects.length} repositories)` : box.project
+    const isTeammates = (row: Row) => row.status === 'taken' && row.assignee !== box.user
+    const canReopen = (row: Row) =>
+      (row.status === 'closed' || row.status === 'done' || row.status === 'rejected') &&
+      [row.from_user, row.closed_by, row.assignee].includes(box.user)
     const closer = (row: Row) =>
-      row.status === 'sent' || row.status === 'taken' || row.status === 'needs-changes' ? (
+      (row.status === 'sent' || row.status === 'taken' || row.status === 'needs-changes') && !isTeammates(row) ? (
         <Button
           key={`close-${row.id}`}
           label={armed === row.id ? 'Close? again' : 'Close'}
@@ -493,7 +677,11 @@ export const register: Register = (on, options) => {
           onPress={() => void pressClose($, row.id)}
         />
       ) : undefined
-    const place = (row: Row) => (taken[String(row.id)] === undefined ? '' : ` in ${taken[String(row.id)] === box.project ? 'this project' : taken[String(row.id)]}`)
+    const place = (row: Row) => {
+      const where = taken[String(row.id)]
+
+      return where === undefined ? '' : ` in ${where === box.project ? 'this session\'s folder' : where}`
+    }
 
     const action = (row: Row, isFirst: boolean) => {
       if (row.status === 'sent') {
@@ -548,17 +736,26 @@ export const register: Register = (on, options) => {
         ['Sent', `${describeAge(report.created_at, now)}${report.version > 1 ? ` · edited, v${report.version}` : ''}`, false],
         ['Status', status, false],
         ['Due', describeDue(report.due, now).replace(/^due /, ''), report.overdue],
+        ['Ready', describeReadiness(report.readiness, report.readiness_note), true],
+        ['Work is', [DELIVERY[report.delivery ?? 'none'], ...(report.delivery_refs ?? [])].filter(Boolean).join(' · '), report.delivery === 'local'],
+        ['Repos', (report.projects ?? []).length > 1 ? (report.projects ?? []).join(', ') : '', false],
         ['Note', report.note ?? '', false],
       ]
+      const others = report.replies.filter(reply => reply.user !== box.user)
+      const unread = new Set(others.slice(Math.max(0, others.length - shown.fresh)).map(reply => reply.id))
 
       return (
         <Box flexDirection="column" paddingX={1}>
           <Box gap={1}>
             {back}
             {action(report, true)}
+            {action(report, true) === undefined && others.length > 0 && (
+              <Button key="take-thread" label="Take reply" hotkey="t" variant="primary" onPress={() => void draftSkill($, 'take', report.id)} />
+            )}
             {isMine(report) && <Button key="done" label="Done" hotkey="d" onPress={() => void draftSkill($, 'done', report.id)} />}
             <Button key="reply" label="Reply" hotkey="r" dimColor onPress={() => void draftSkill($, 'reply', report.id)} />
             {closer(report)}
+            {canReopen(report) && <Button key="reopen" label="Reopen" onPress={() => void draftSkill($, 'reopen', report.id)} />}
             <Box flexGrow={1} />
             {previous && <Button key="previous" label="‹ Prev" hotkey="p" dimColor onPress={() => void readReport($, previous.id)} />}
             {following && <Button key="next" label="Next ›" hotkey="n" dimColor onPress={() => void readReport($, following.id)} />}
@@ -587,6 +784,41 @@ export const register: Register = (on, options) => {
               </Box>
             ))}
           <Text dimColor>{rule}</Text>
+          {(report.related ?? []).length > 0 && (
+            <Box gap={1}>
+              <Text dimColor>Related</Text>
+              {(report.related ?? []).map(number => (
+                <Button key={`related-${number}`} label={`#${number}`} dimColor onPress={() => void readReport($, number)} />
+              ))}
+            </Box>
+          )}
+          {report.items.length > 0 && (
+            <Box marginTop={1} flexDirection="column">
+              <Text color="suggestion" bold>
+                Checklist · {report.items.filter(item => item.done).length}/{report.items.length} done
+              </Text>
+              {report.items.map(item => (
+                <Box key={`item-${item.id}`} gap={1}>
+                  <Button
+                    key={`check-${item.id}`}
+                    label={item.done ? '[x]' : '[ ]'}
+                    plain
+                    dimColor={item.done}
+                    onPress={() => void pressCheck($, report.id, item.id, !item.done)}
+                  />
+                  <Box flexGrow={1} flexShrink={1}>
+                    <Text dimColor={item.done} strikethrough={item.done} wrap="wrap">
+                      {item.id}. {printable(item.title)}
+                    </Text>
+                  </Box>
+                  {item.project && <Text color="suggestion">{printable(item.project)}</Text>}
+                  {item.done && item.done_by && <Text dimColor>{printable(item.done_by)}</Text>}
+                  {!item.done && item.readiness !== 'ready' && <Text color="warning">{WAITS[item.readiness]}</Text>}
+                </Box>
+              ))}
+              <Text dimColor>{rule}</Text>
+            </Box>
+          )}
           <Box marginTop={1} flexDirection="column">
             <Markdown text={readable(report.text)} />
           </Box>
@@ -602,6 +834,11 @@ export const register: Register = (on, options) => {
                     <Text color={reply.user === box.user ? 'success' : 'suggestion'}>↳</Text>
                     <Text bold>{printable(reply.user === box.user ? 'you' : `${reply.team}/${reply.user}`)}</Text>
                     <Text dimColor>{describeAge(reply.created_at, now)}</Text>
+                    {unread.has(reply.id) && (
+                      <Text color="success" bold>
+                        ● new
+                      </Text>
+                    )}
                   </Box>
                   <Box paddingLeft={2} flexDirection="column">
                     <Markdown text={readable(reply.text)} />
@@ -623,24 +860,39 @@ export const register: Register = (on, options) => {
     const open = waiting.filter(row => row.to_user !== box.user)
     const groups = [
       { title: 'For you', rows: forMe },
-      { title: `This project · ${box.project}`, rows: open.filter(row => row.project === box.project) },
-      { title: 'Other projects', rows: open.filter(row => row.project !== box.project) },
+      { title: `Here · ${hereLabel}`, rows: open.filter(isHere) },
+      { title: 'Other projects', rows: open.filter(row => !isHere(row)) },
       { title: 'In progress', rows: box.rows.filter(row => row.status === 'taken') },
       { title: 'Returned to you · needs changes', rows: box.returnedRows },
     ].filter(group => group.rows.length > 0)
     let room = Math.max(2, Math.floor(((e.viewport?.rows ?? 30) - 6 - groups.length * 2) / 2))
     const first = groups[0]?.rows[0]?.id
-    const mine = waiting.filter(row => row.to_user === null || row.to_user === box.user)
-    const here = mine.filter(row => row.project === box.project)
+    const mine = waiting.filter(row => (row.to_user === null || row.to_user === box.user) && (row.readiness ?? 'ready') === 'ready')
+    const here = mine.filter(isHere)
     const takeable = here.length > 1 ? here : mine
     const chosen = picked.filter(id => waiting.some(row => row.id === id))
+    const justClosed = await read($, lastClosed)
+    const isShowingHidden = await read($, showHidden)
     const toggle = (id: number) => void update($, selected, ids => (ids.includes(id) ? ids.filter(one => one !== id) : [...ids, id]))
+
+    const progress = (row: Row) => {
+      if ((row.items_total ?? 0) === 0) {
+        return ''
+      }
+
+      const all = `${row.items_done ?? 0}/${row.items_total} done`
+      const share = row.items_here_total ?? 0
+
+      return share > 0 && share < (row.items_total ?? 0) ? `${row.items_here_done ?? 0}/${share} here · ${all}` : all
+    }
 
     const details = (row: Row) =>
       [
         `from ${row.from_team}/${row.from_user}`,
-        row.project === box.project ? '' : row.project,
+        isHere(row) && (row.projects ?? []).length < 2 ? '' : (row.projects ?? [row.project]).join(', '),
         describeDue(row.due, now),
+        progress(row),
+        describeReadiness(row.readiness, row.readiness_note),
         row.replies > 0 ? `${row.replies} ${row.replies === 1 ? 'reply' : 'replies'}` : '',
         row.status === 'taken' ? `taken by ${isMine(row) ? 'you' : row.assignee}${place(row)}` : '',
       ]
@@ -656,7 +908,53 @@ export const register: Register = (on, options) => {
             · {box.takenByMe} in progress{box.overdue > 0 ? ` · ${box.overdue} overdue` : ''}
           </Text>
         </Box>
-        {groups.length === 0 && <Text dimColor>Nothing waiting. New reports appear here as they arrive.</Text>}
+        {justClosed !== null && (
+          <Box gap={1}>
+            <Text color="warning">You closed #{justClosed} for everyone.</Text>
+            <Button key="undo-close" label="Undo" variant="primary" onPress={() => void pressUndo($, justClosed)} />
+            <Button key="keep-closed" label="Keep closed" dimColor onPress={() => void update($, lastClosed, () => null)} />
+          </Box>
+        )}
+        {box.threads.length > 0 && (
+          <Box flexDirection="column" marginTop={1}>
+            <Text color="success" bold>
+              Replies for you
+            </Text>
+            {box.threads.map(thread => (
+              <Box key={`thread-${thread.id}`} flexDirection="column">
+                <Box gap={1}>
+                  <Box width={1} flexShrink={0}>
+                    <Text color="success">●</Text>
+                  </Box>
+                  <Box width={4} flexShrink={0}>
+                    <Text bold>#{thread.id}</Text>
+                  </Box>
+                  <Box flexGrow={1} flexShrink={1}>
+                    <Text bold wrap="truncate-end">
+                      {printable(thread.title)}
+                    </Text>
+                  </Box>
+                  <Box gap={1} flexShrink={0}>
+                    <Button key={`read-thread-${thread.id}`} label="Read" onPress={() => void readReport($, thread.id)} />
+                    <Button
+                      key={`take-thread-${thread.id}`}
+                      label="Take"
+                      variant="primary"
+                      onPress={() => void draftSkill($, 'take', thread.id)}
+                    />
+                  </Box>
+                </Box>
+                <Text dimColor wrap="truncate-end">
+                  {'      '}
+                  {printable(`${thread.unread === 1 ? '1 new reply' : `${thread.unread} new replies`} · ${thread.last_reply_by}: ${thread.last_reply_excerpt}`)}
+                </Text>
+              </Box>
+            ))}
+          </Box>
+        )}
+        {groups.length === 0 && box.threads.length === 0 && (
+          <Text dimColor>Nothing waiting. New reports appear here as they arrive.</Text>
+        )}
         {(chosen.length > 0 || takeable.length > 1) && (
           <Box gap={1}>
             {chosen.length > 0 && (
@@ -711,7 +1009,9 @@ export const register: Register = (on, options) => {
                         <Text bold>#{row.id}</Text>
                       </Box>
                       <Box width={6} flexShrink={0}>
-                        <Text color={PRIORITY_COLOR[row.priority]}>{row.priority}</Text>
+                        <Text color={PRIORITY_COLOR[row.priority]} dimColor={(row.readiness ?? 'ready') !== 'ready'}>
+                          {row.priority}
+                        </Text>
                       </Box>
                       <Box flexGrow={1} flexShrink={1}>
                         <Text bold={isUnread} wrap="truncate-end">
@@ -728,6 +1028,9 @@ export const register: Register = (on, options) => {
                         />
                         {action(row, row.id === first)}
                         {closer(row)}
+                        {(row.status === 'sent' || row.status === 'taken') && (
+                          <Button key={`hide-${row.id}`} label="hide" plain dimColor onPress={() => void pressHide($, row.id, true)} />
+                        )}
                       </Box>
                     </Box>
                     <Text color={row.overdue ? 'error' : undefined} dimColor={!row.overdue} wrap="truncate-end">
@@ -745,11 +1048,44 @@ export const register: Register = (on, options) => {
             </Box>
           )
         })}
+        {box.hiddenRows.length > 0 && (
+          <Box marginTop={1} flexDirection="column">
+            <Box gap={1}>
+              <Text dimColor>{box.hiddenRows.length} hidden from your list</Text>
+              <Button
+                key="toggle-hidden"
+                label={isShowingHidden ? 'Collapse' : 'Show'}
+                dimColor
+                onPress={() => void update($, showHidden, isOn => !isOn)}
+              />
+            </Box>
+            {isShowingHidden &&
+              box.hiddenRows.map(row => (
+                <Box key={`hidden-${row.id}`} gap={1}>
+                  <Box width={5} flexShrink={0}>
+                    <Text dimColor>#{row.id}</Text>
+                  </Box>
+                  <Box flexGrow={1} flexShrink={1}>
+                    <Text dimColor wrap="truncate-end">
+                      {printable(row.title)}
+                    </Text>
+                  </Box>
+                  <Box gap={1} flexShrink={0}>
+                    <Button key={`read-${row.id}`} label="Read" dimColor onPress={() => void readReport($, row.id)} />
+                    <Button key={`unhide-${row.id}`} label="unhide" plain dimColor onPress={() => void pressHide($, row.id, false)} />
+                  </Box>
+                </Box>
+              ))}
+          </Box>
+        )}
         <Box marginTop={1}>
           <Text dimColor>● new since you last looked · [ ] selects several to take together · Read opens it here</Text>
         </Box>
         <Box>
-          <Text dimColor>Close ends a report nobody needs: press twice, anyone can · esc hides this pane</Text>
+          <Text dimColor>Take on a reply hands the whole thread to Claude to answer or act on</Text>
+        </Box>
+        <Box>
+          <Text dimColor>hide removes a report from your own list only · Close ends it for everyone (press twice)</Text>
         </Box>
       </Box>
     )
