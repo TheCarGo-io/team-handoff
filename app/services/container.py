@@ -1,3 +1,4 @@
+from app.core.database import async_session
 from app.core.redis import get_redis
 from app.repositories.report import ReportRepository
 from app.repositories.user import UserRepository
@@ -20,9 +21,8 @@ def reset_hub() -> None:
 
 
 def get_users() -> UserRepository:
-    return UserRepository(get_redis())
+    return UserRepository(async_session)
 
 
 def get_report_service() -> ReportService:
-    redis = get_redis()
-    return ReportService(ReportRepository(redis), UserRepository(redis), get_hub())
+    return ReportService(ReportRepository(async_session, get_redis()), UserRepository(async_session), get_hub())

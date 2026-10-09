@@ -2,6 +2,7 @@ import asyncio
 from functools import partial
 
 from app.core.config import settings
+from app.core.database import async_session
 from app.dependencies.auth import is_authorized
 from app.repositories.user import UserRepository
 from app.schemas.user import User
@@ -95,7 +96,7 @@ async def test_stream_ends_at_the_next_heartbeat_after_the_token_is_revoked(redi
     lines = stream(hub, User(name="ali", team="frontend"), partial(is_authorized, tokens["ali"]["Authorization"]))
     assert await anext(lines) == ": connected\n\n"
     assert await anext(lines) == ": ping\n\n"
-    await UserRepository(redis).create("ali", "frontend")
+    await UserRepository(async_session).create("ali", "frontend")
     assert [extra async for extra in lines] == []
 
 

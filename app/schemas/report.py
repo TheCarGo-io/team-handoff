@@ -80,7 +80,6 @@ class EventType(str, Enum):
 PRIORITY_ORDER = {Priority.urgent: 0, Priority.high: 1, Priority.normal: 2, Priority.low: 3}
 OPEN_STATUSES = (Status.sent, Status.taken, Status.needs_changes)
 CLOSED_STATUSES = (Status.done, Status.rejected, Status.closed)
-UNSHIPPED = (Delivery.local, Delivery.pushed, Delivery.pr)
 
 
 class Item(BaseModel):
@@ -164,7 +163,6 @@ class Report(ReportBase):
     closed_by: str | None = None
     status_before_closing: Status | None = None
     delivery_refs: list[str] = Field(default=[], description="Branch, PR link or commit of the finished work")
-    retention_from: datetime | None = None
 
     @property
     def projects(self) -> list[str]:
@@ -172,7 +170,7 @@ class Report(ReportBase):
 
     def row(self, here: set[str] | None = None) -> ReportRow:
         local = [item for item in self.items if (item.project or self.project) in here] if here else None
-        hidden = {"replies", "text", "overdue", "items", "status_before_closing", "delivery_refs", "retention_from"}
+        hidden = {"replies", "text", "overdue", "items", "status_before_closing", "delivery_refs"}
         return ReportRow(
             **self.model_dump(exclude=hidden),
             replies=len(self.replies),

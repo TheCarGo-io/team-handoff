@@ -43,9 +43,11 @@ async def inbox(user: CurrentUser, reports: Reports, projects: Projects = []) ->
 
 
 @router.get("/board", response_model=list[ReportRow])
-async def board(user: CurrentUser, reports: Reports, project: Project = None) -> list[ReportRow]:
-    """Every report of every team, open ones first."""
-    return await reports.board(project)
+async def board(
+    user: CurrentUser, reports: Reports, project: Project = None, archived: bool = False
+) -> list[ReportRow]:
+    """Every team's reports, open ones first. Closed ones show for 14 days; `archived=true` lists them all."""
+    return await reports.board(project, archived)
 
 
 @router.post("/reports", response_model=Report, status_code=201, responses={**BAD_REQUEST, **WRITE})
@@ -80,7 +82,7 @@ async def edit(report_id: int, body: EditRequest, user: CurrentUser, reports: Re
 
 @router.delete("/reports/{report_id}", status_code=204, responses={**NOT_FOUND, **FORBIDDEN, **WRITE})
 async def withdraw(report_id: int, user: CurrentUser, reports: Reports) -> None:
-    """Withdraw a report I sent: it is deleted at once, in any status."""
+    """Withdraw a report I sent: it is deleted for good, in any status."""
     await reports.withdraw(user, report_id)
 
 
@@ -136,7 +138,7 @@ async def close(report_id: int, user: CurrentUser, reports: Reports, body: Close
     responses={**NOT_FOUND, **FORBIDDEN, **CONFLICT, **WRITE},
 )
 async def reopen(report_id: int, user: CurrentUser, reports: Reports, body: ReopenRequest | None = None) -> Report:
-    """Reopen a closed or done report within its 48 hours. Its sender, its holder or whoever closed it may."""
+    """Reopen a closed or done report. Its sender, its holder or whoever closed it may."""
     return await reports.reopen(user, report_id, body or ReopenRequest())
 
 

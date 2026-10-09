@@ -135,10 +135,11 @@ async def inbox(ctx: Context, project: str | None = None, projects: list[str] | 
 
 
 @tool
-async def board(ctx: Context, project: str | None = None) -> list[dict]:
+async def board(ctx: Context, project: str | None = None, archived: bool = False) -> list[dict]:
     """List every handoff report of every team as compact rows (no body), open ones first. Rows carry the
-    projects, checklist progress, readiness and, for done reports, delivery (local, pushed, pr, merged)."""
-    return [compact(row) for row in await get_report_service().board(project)]
+    projects, checklist progress, readiness and, for done reports, delivery (local, pushed, pr, merged).
+    Closed reports are listed for 14 days; archived=true lists the older ones too."""
+    return [compact(row) for row in await get_report_service().board(project, archived)]
 
 
 @tool
@@ -207,8 +208,8 @@ async def close(report_id: int, ctx: Context, note: str = "") -> dict:
 
 @tool
 async def reopen(report_id: int, ctx: Context, note: str = "") -> dict:
-    """Reopen a handoff report that was closed or marked done, within 48 hours of that. Allowed for its
-    sender, its holder and whoever closed it. It returns to the state it had: waiting, or in progress with
+    """Reopen a handoff report that was closed or marked done. Allowed for its sender, its holder and
+    whoever closed it. It returns to the state it had: waiting, or in progress with
     the same holder. note says why (for example what is still missing)."""
     report = await get_report_service().reopen(caller(ctx), report_id, ReopenRequest(note=note))
     return compact(report.row())

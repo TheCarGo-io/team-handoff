@@ -2,12 +2,12 @@ import argparse
 import asyncio
 
 from app.core.config import settings
-from app.core.redis import get_redis
+from app.core.database import async_session, engine
 from app.repositories.user import UserRepository
 
 
 async def run(args: argparse.Namespace) -> None:
-    users = UserRepository(get_redis())
+    users = UserRepository(async_session)
     if args.command == "add":
         if args.team not in settings.TEAMS:
             raise SystemExit(f"Unknown team '{args.team}'. Teams: {', '.join(settings.TEAMS)}")
@@ -18,7 +18,7 @@ async def run(args: argparse.Namespace) -> None:
     else:
         for user in await users.all():
             print(f"{user.team:10} {user.name}")
-    await get_redis().aclose()
+    await engine.dispose()
 
 
 def main() -> None:

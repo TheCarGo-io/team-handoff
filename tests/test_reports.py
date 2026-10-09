@@ -1,9 +1,7 @@
 import asyncio
-import json
 from datetime import UTC, datetime, timedelta
 
 from app.core.config import settings
-from app.core.redis import key
 from tests.conftest import report_body
 
 
@@ -128,16 +126,13 @@ async def test_take_next_leaves_reports_addressed_to_a_teammate(client, tokens):
     assert (await client.post("/api/v1/reports/take-next", headers=tokens["vali"])).json()["id"] == for_vali["id"]
 
 
-async def test_done_closes_the_report_and_shortens_its_lifetime(client, tokens, redis):
+async def test_done_closes_the_report(client, tokens):
     report = await send(client, tokens["asliddin"])
-    name = key("report", report["id"])
-    assert 6 * 86400 < await redis.ttl(name) <= 7 * 86400
 
     await client.post(f"/api/v1/reports/{report['id']}/take", headers=tokens["ali"])
     body = {"status": "done", "note": "PR #88"}
     done = await client.post(f"/api/v1/reports/{report['id']}/resolve", json=body, headers=tokens["ali"])
     assert done.json()["status"] == "done" and done.json()["note"] == "PR #88" and done.json()["closed_at"]
-    assert 47 * 3600 < await redis.ttl(name) <= 48 * 3600
 
     again = await client.post(f"/api/v1/reports/{report['id']}/resolve", json=body, headers=tokens["ali"])
     assert again.status_code == 409
@@ -184,27 +179,36 @@ async def test_replies_are_limited_to_the_two_teams_involved(client, tokens):
     assert (await client.get("/api/v1/inbox", headers=tokens["ali"])).json()["rows"][0]["replies"] == 1
 
 
-async def test_expired_report_disappears_from_lists(client, tokens, redis):
+async def test_closed_reports_leave_the_lists_after_two_weeks_but_are_never_deleted(client, tokens, database):
+    recent = await send(client, tokens["asliddin"], title="closed yesterday")
+    old = await send(client, tokens["asliddin"], title="closed last month")
+    for report in (recent, old):
+        await client.post(f"/api/v1/reports/{report['id']}/resolve", json={"status": "done"}, headers=tokens["ali"])
+    aged = "update reports set closed_at = now() - interval '30 days', updated_at = now() - interval '30 days'"
+    await database.execute(f"{aged} where id = :id", id=old["id"])
+
+    board = (await client.get("/api/v1/board", headers=tokens["ali"])).json()
+    assert [row["id"] for row in board] == [recent["id"]]
+    archive = (await client.get("/api/v1/board?archived=true", headers=tokens["ali"])).json()
+    assert [row["id"] for row in archive] == [recent["id"], old["id"]]
+
+    assert (await client.get(f"/api/v1/reports/{old['id']}", headers=tokens["ali"])).json()["text"]
+    reopened = await client.post(f"/api/v1/reports/{old['id']}/reopen", headers=tokens["asliddin"])
+    assert reopened.json()["status"] == "taken"
+    assert old["id"] in [row["id"] for row in (await client.get("/api/v1/board", headers=tokens["ali"])).json()]
+
+
+async def test_an_old_closed_report_comes_back_into_view_when_someone_replies(client, tokens, database):
     report = await send(client, tokens["asliddin"])
-    await redis.delete(key("report", report["id"]))
-    assert (await client.get("/api/v1/board", headers=tokens["ali"])).json() == []
-    assert (await client.get(f"/api/v1/reports/{report['id']}", headers=tokens["ali"])).status_code == 404
-    assert await redis.smembers(key("reports")) == set()
+    await client.post(f"/api/v1/reports/{report['id']}/resolve", json={"status": "done"}, headers=tokens["ali"])
+    aged = "update reports set closed_at = now() - interval '30 days', updated_at = now() - interval '30 days'"
+    await database.execute(aged)
+    assert (await client.get("/api/v1/inbox", headers=tokens["asliddin"])).json()["threads"] == []
 
-
-async def test_reply_after_closing_does_not_extend_the_48_hours(client, tokens, redis):
-    report = await send(client, tokens["asliddin"])
-    body = {"status": "done"}
-    await client.post(f"/api/v1/reports/{report['id']}/resolve", json=body, headers=tokens["ali"])
-    await redis.expire(key("report", report["id"]), 1000)
-    stored = await client.get(f"/api/v1/reports/{report['id']}", headers=tokens["ali"])
-    closed_at = datetime.fromisoformat(stored.json()["closed_at"]) - timedelta(hours=47)
-    raw = stored.json() | {"closed_at": closed_at.isoformat(), "retention_from": closed_at.isoformat()}
-    raw.pop("overdue")
-    await redis.set(key("report", report["id"]), json.dumps(raw), ex=3600)
-
-    await client.post(f"/api/v1/reports/{report['id']}/replies", json={"text": "thanks"}, headers=tokens["asliddin"])
-    assert 3000 < await redis.ttl(key("report", report["id"])) <= 3600
+    body = {"text": "one more question about this"}
+    await client.post(f"/api/v1/reports/{report['id']}/replies", json=body, headers=tokens["ali"])
+    threads = (await client.get("/api/v1/inbox", headers=tokens["asliddin"])).json()["threads"]
+    assert [thread["id"] for thread in threads] == [report["id"]]
 
 
 async def test_handing_back_needs_a_reason_and_rejected_is_gone(client, tokens):
@@ -217,7 +221,7 @@ async def test_handing_back_needs_a_reason_and_rejected_is_gone(client, tokens):
     assert (await client.post(url, json={"status": "done"}, headers=tokens["ali"])).status_code == 200
 
 
-async def test_anyone_can_close_an_open_report_without_a_reason(client, tokens, redis):
+async def test_anyone_can_close_an_open_report_without_a_reason(client, tokens):
     waiting = await send(client, tokens["asliddin"])
     held = await send(client, tokens["asliddin"], title="held one")
     await client.post(f"/api/v1/reports/{held['id']}/take", headers=tokens["ali"])
@@ -238,7 +242,6 @@ async def test_anyone_can_close_an_open_report_without_a_reason(client, tokens, 
     assert [row["status"] for row in (await client.get("/api/v1/board", headers=tokens["ali"])).json()] == [
         "closed"
     ] * 2
-    assert 47 * 3600 < await redis.ttl(key("report", held["id"])) <= 48 * 3600
 
 
 async def test_a_returned_report_can_be_closed_by_its_sender(client, tokens):
@@ -260,7 +263,7 @@ async def test_edit_without_a_real_change_is_refused_or_ignored(client, tokens):
     assert real.json()["version"] == 2 and real.json()["priority"] == "high"
 
 
-async def test_sender_can_withdraw_a_report_and_nobody_else_can(client, tokens, redis):
+async def test_sender_can_withdraw_a_report_and_nobody_else_can(client, tokens, database):
     report = await send(client, tokens["asliddin"], text="SECRET=xyz")
     url = f"/api/v1/reports/{report['id']}"
     await client.post(f"{url}/take", headers=tokens["ali"])
@@ -269,7 +272,7 @@ async def test_sender_can_withdraw_a_report_and_nobody_else_can(client, tokens, 
     assert (await client.delete(url, headers=tokens["asliddin"])).status_code == 204
     assert (await client.get(url, headers=tokens["ali"])).status_code == 404
     assert (await client.get("/api/v1/board", headers=tokens["ali"])).json() == []
-    assert await redis.exists(key("report", report["id"])) == 0
+    assert await database("select count(*) from reports") == 0
 
 
 async def test_replies_are_capped_per_report(client, tokens, monkeypatch):
@@ -294,11 +297,13 @@ async def test_changes_are_rate_limited_per_user(client, tokens, monkeypatch):
 
 async def test_readiness_reports_a_stopped_event_listener(client, redis):
     response = await client.get("/health/ready")
-    assert response.status_code == 503 and response.json() == {"status": "degraded", "redis": True, "events": False}
+    assert response.status_code == 503
+    assert response.json() == {"status": "degraded", "database": True, "redis": True, "events": False}
 
 
 async def test_readiness_is_ok_while_listening(client, hub):
-    assert (await client.get("/health/ready")).json() == {"status": "ok", "redis": True, "events": True}
+    expected = {"status": "ok", "database": True, "redis": True, "events": True}
+    assert (await client.get("/health/ready")).json() == expected
 
 
 ITEMS = [{"title": "Stage history panel"}, {"title": "Response time chart"}, {"title": "Waiting leads list"}]
@@ -393,7 +398,7 @@ async def test_hiding_is_personal_and_leaves_the_report_alone(client, tokens):
     assert (await client.get("/api/v1/inbox", headers=tokens["ali"])).json()["hidden"] == 0
 
 
-async def test_hidden_reports_leave_the_counts_and_come_back_when_taken(client, tokens, redis):
+async def test_hidden_reports_leave_the_counts_and_come_back_when_taken(client, tokens, database):
     report = await send(client, tokens["asliddin"], due=(datetime.now(UTC) - timedelta(hours=1)).isoformat())
     await client.post(f"/api/v1/reports/{report['id']}/hide", headers=tokens["ali"])
     inbox = (await client.get("/api/v1/inbox?project=thecargo-frontend", headers=tokens["ali"])).json()
@@ -406,10 +411,10 @@ async def test_hidden_reports_leave_the_counts_and_come_back_when_taken(client, 
     await client.post(f"/api/v1/reports/{report['id']}/hide", headers=tokens["ali"])
     await client.post(f"/api/v1/reports/{report['id']}/resolve", json={"status": "done"}, headers=tokens["ali"])
     assert (await client.get("/api/v1/inbox", headers=tokens["ali"])).json()["hidden"] == 0
-    assert await redis.smembers(key("hidden", "ali")) == set()
+    assert await database("select count(*) from hidden_reports where user_name = 'ali'") == 0
 
 
-async def test_a_closed_report_reopens_to_the_state_it_had(client, tokens, redis):
+async def test_a_closed_report_reopens_to_the_state_it_had(client, tokens):
     waiting = await send(client, tokens["asliddin"], title="was waiting")
     held = await send(client, tokens["asliddin"], title="was held")
     await client.post(f"/api/v1/reports/{held['id']}/take", headers=tokens["ali"])
@@ -433,7 +438,6 @@ async def test_a_closed_report_reopens_to_the_state_it_had(client, tokens, redis
         "not finished",
     )
     assert by_holder.json()["closed_at"] is None
-    assert 6 * 86400 < await redis.ttl(key("report", held["id"])) <= 7 * 86400
 
     assert (await client.post(f"/api/v1/reports/{held['id']}/reopen", headers=tokens["ali"])).status_code == 409
     assert [row["id"] for row in (await client.get("/api/v1/inbox", headers=tokens["ali"])).json()["rows"]] == [
@@ -536,7 +540,7 @@ async def test_unread_replies_follow_the_people_involved_until_they_read_them(cl
     assert (await client.get("/api/v1/inbox", headers=tokens["asliddin"])).json()["unread_replies"] == 0
 
 
-async def test_unread_replies_stay_visible_on_a_closed_report_and_vanish_with_it(client, tokens, redis):
+async def test_unread_replies_stay_visible_on_a_closed_report_and_vanish_with_it(client, tokens, database):
     report = await send(client, tokens["asliddin"])
     rid = report["id"]
     await client.post(f"/api/v1/reports/{rid}/replies", json={"text": "done, see PR"}, headers=tokens["ali"])
@@ -544,10 +548,14 @@ async def test_unread_replies_stay_visible_on_a_closed_report_and_vanish_with_it
     assert (await client.get("/api/v1/inbox", headers=tokens["asliddin"])).json()["threads"][0]["status"] == "done"
 
     await client.get(f"/api/v1/reports/{rid}?mark_seen=true", headers=tokens["asliddin"])
-    assert await redis.hgetall(key("seen", "asliddin")) != {}
-    await redis.delete(key("report", rid))
+    assert await database("select count(*) from reply_reads where user_name = 'asliddin'") == 1
+    await client.post(f"/api/v1/reports/{rid}/replies", json={"text": "merged now"}, headers=tokens["ali"])
+    assert (await client.get("/api/v1/inbox", headers=tokens["asliddin"])).json()["unread_replies"] == 1
+
+    await client.delete(f"/api/v1/reports/{rid}", headers=tokens["asliddin"])
     assert (await client.get("/api/v1/inbox", headers=tokens["asliddin"])).json()["threads"] == []
-    assert await redis.hgetall(key("seen", "asliddin")) == {}
+    assert await database("select count(*) from reply_reads") == 0
+    assert await database("select count(*) from replies") == 0
 
 
 async def test_done_is_refused_while_items_are_unticked_unless_told_otherwise(client, tokens):
@@ -569,13 +577,12 @@ async def test_done_is_refused_while_items_are_unticked_unless_told_otherwise(cl
     assert forced.status_code == 200 and forced.json()["status"] == "done"
 
 
-async def test_done_says_where_the_work_is_and_unshipped_work_is_kept_longer(client, tokens, redis):
+async def test_done_says_where_the_work_is_and_it_can_be_updated(client, tokens):
     report = await send(client, tokens["asliddin"])
     url = f"/api/v1/reports/{report['id']}"
     body = {"status": "done", "note": "built", "delivery": "local", "refs": ["branch feat/apple-sign-in"]}
     done = await client.post(f"{url}/resolve", json=body, headers=tokens["ali"])
     assert (done.json()["delivery"], done.json()["delivery_refs"]) == ("local", ["branch feat/apple-sign-in"])
-    assert 6 * 86400 < await redis.ttl(key("report", report["id"])) <= 7 * 86400
     assert (await client.get("/api/v1/board", headers=tokens["asliddin"])).json()[0]["delivery"] == "local"
 
     by_sender = await client.post(f"{url}/delivery", json={"delivery": "merged"}, headers=tokens["asliddin"])
@@ -583,7 +590,6 @@ async def test_done_says_where_the_work_is_and_unshipped_work_is_kept_longer(cli
     body = {"delivery": "merged", "refs": ["PR #88"]}
     merged = (await client.post(f"{url}/delivery", json=body, headers=tokens["vali"])).json()
     assert (merged["delivery"], merged["delivery_refs"], merged["status"]) == ("merged", ["PR #88"], "done")
-    assert 47 * 3600 < await redis.ttl(key("report", report["id"])) <= 48 * 3600
 
     reopened = await client.post(f"{url}/reopen", headers=tokens["asliddin"])
     assert (reopened.json()["delivery"], reopened.json()["delivery_refs"]) == (None, [])
@@ -608,3 +614,22 @@ async def test_a_long_report_and_a_long_reply_fit(client, tokens):
     assert (await client.post(url, json={"text": "y" * 15000}, headers=tokens["ali"])).status_code == 200
     too_long = await client.post("/api/v1/reports", json=report_body(text="x" * 60001), headers=tokens["asliddin"])
     assert too_long.status_code == 422
+
+
+async def test_every_change_is_kept_in_the_history(client, tokens, database):
+    report = await send(client, tokens["asliddin"])
+    await client.post(f"/api/v1/reports/{report['id']}/take", headers=tokens["ali"])
+    await client.post(f"/api/v1/reports/{report['id']}/resolve", json={"status": "done"}, headers=tokens["ali"])
+    await client.delete(f"/api/v1/reports/{report['id']}", headers=tokens["asliddin"])
+    history = await database("select string_agg(type || ':' || by_user, ', ' order by id) from events")
+    assert history == "new:asliddin, taken:ali, done:ali, withdrawn:asliddin"
+
+
+async def test_ids_keep_counting_and_a_token_is_stored_only_as_a_hash(client, tokens, database):
+    first = await send(client, tokens["asliddin"])
+    await client.delete(f"/api/v1/reports/{first['id']}", headers=tokens["asliddin"])
+    second = await send(client, tokens["asliddin"])
+    assert second["id"] == first["id"] + 1
+    token = tokens["ali"]["Authorization"].removeprefix("Bearer ")
+    assert await database("select count(*) from users where token_hash = :token", token=token) == 0
+    assert await database("select length(token_hash) from users where name = 'ali'") == 64

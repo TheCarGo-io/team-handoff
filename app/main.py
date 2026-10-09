@@ -8,6 +8,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.core.config import settings
+from app.core.database import engine
 from app.core.errors import HandoffError
 from app.core.redis import close_redis
 from app.dependencies.auth import BearerGate
@@ -45,6 +46,7 @@ async def lifespan(_: FastAPI):
     with contextlib.suppress(asyncio.CancelledError):
         await listener
     await close_redis()
+    await engine.dispose()
 
 
 app = FastAPI(title="TheCargo Handoff", version="0.1.0", lifespan=lifespan)

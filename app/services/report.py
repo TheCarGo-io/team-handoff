@@ -94,24 +94,27 @@ class ReportService:
             "report=%s event=%s by=%s/%s status=%s", report.id, kind.value, actor.team, actor.name, report.status.value
         )
         teams = sorted({report.to_team, report.from_team}) if kind != EventType.new else [report.to_team]
-        await self.hub.publish(
-            Event(
-                type=kind,
-                id=report.id,
-                title=report.title,
-                project=report.project,
-                priority=report.priority,
-                by_team=actor.team,
-                by_user=actor.name,
-                from_team=report.from_team,
-                from_user=report.from_user,
-                to_team=report.to_team,
-                to_user=report.to_user,
-                note=note[:300],
-                teams=teams,
-                notify_users=notify_users,
-            )
+        event = Event(
+            type=kind,
+            id=report.id,
+            title=report.title,
+            project=report.project,
+            priority=report.priority,
+            by_team=actor.team,
+            by_user=actor.name,
+            from_team=report.from_team,
+            from_user=report.from_user,
+            to_team=report.to_team,
+            to_user=report.to_user,
+            note=note[:300],
+            teams=teams,
+            notify_users=notify_users,
         )
+        try:
+            await self.reports.record(event)
+        except Exception:
+            logger.exception("event %s for report #%s was not recorded", kind.value, report.id)
+        await self.hub.publish(event)
 
     async def send(self, actor: User, body: SendRequest) -> Report:
         await self.guard(actor)
@@ -128,7 +131,7 @@ class ReportService:
                 raise HandoffError(f"'{body.to_user}' is not a member of team '{body.to_team}'")
         stamp = now()
         report = Report(
-            id=await self.reports.next_id(),
+            id=0,
             title=body.title,
             text=body.text,
             project=project,
@@ -145,7 +148,7 @@ class ReportService:
             created_at=stamp,
             updated_at=stamp,
         )
-        await self.reports.save(report)
+        report = await self.reports.create(report)
         await self.emit(EventType.new, report, actor, [body.to_user] if body.to_user else None)
         return report
 
@@ -160,15 +163,15 @@ class ReportService:
             await self.hub.refresh_user(actor.name)
         return report, [reply.id for reply in fresh]
 
-    async def board(self, project: str | None = None) -> list[ReportRow]:
+    async def board(self, project: str | None = None, archived: bool = False) -> list[ReportRow]:
         wanted = canonical(project) if project else None
-        reports = [r for r in await self.reports.all() if wanted is None or wanted in r.projects]
+        reports = [r for r in await self.reports.listing(archived) if wanted is None or wanted in r.projects]
         return [r.row() for r in sorted(reports, key=lambda r: (r.status in CLOSED_STATUSES, r.sort_key()))]
 
     async def inbox(self, actor: User, projects: list[str] | None = None) -> InboxResponse:
         here = list(dict.fromkeys(canonical(name) for name in projects or []))
         here_set = set(here)
-        reports = await self.reports.all()
+        reports = await self.reports.listing()
         team_open = sorted(
             (r for r in reports if r.to_team == actor.team and r.status in (Status.sent, Status.taken)),
             key=lambda r: r.sort_key(),
@@ -182,9 +185,6 @@ class ReportService:
         waiting = [r for r in mine if r.status == Status.sent]
         returned = [r for r in reports if r.from_user == actor.name and r.status == Status.needs_changes]
         seen = await self.reports.seen(actor.name)
-        gone = set(seen) - {r.id for r in reports}
-        if gone:
-            await self.reports.forget_seen(actor.name, *gone)
         threads = []
         for report in reports:
             fresh = unread_replies(report, actor, seen) if is_party(report, actor) else []
@@ -260,7 +260,6 @@ class ReportService:
 
     async def reply(self, actor: User, report_id: int, body: ReplyRequest) -> Report:
         await self.guard(actor)
-        reply_id = await self.reports.next_reply_id()
 
         def change(report: Report) -> bool:
             if actor.team not in (report.from_team, report.to_team):
@@ -268,14 +267,12 @@ class ReportService:
             if len(report.replies) >= settings.MAX_REPLIES:
                 raise Conflict(f"Report #{report.id} already has {settings.MAX_REPLIES} replies; send a new report")
             stamp = now()
-            report.replies.append(
-                Reply(id=reply_id, team=actor.team, user=actor.name, text=body.text, created_at=stamp)
-            )
+            report.replies.append(Reply(id=0, team=actor.team, user=actor.name, text=body.text, created_at=stamp))
             report.updated_at = stamp
             return True
 
         report, _ = await self.reports.mutate(report_id, change)
-        await self.reports.mark_seen(actor.name, report_id, reply_id)
+        await self.reports.mark_seen(actor.name, report_id, report.replies[-1].id)
         audience = others(actor, report.from_user, report.assignee, report.to_user)
         await self.emit(EventType.reply, report, actor, audience or None, note=body.text)
         return report
@@ -304,7 +301,7 @@ class ReportService:
             report.note = body.note or None
             report.updated_at = stamp
             is_closing = report.status in CLOSED_STATUSES
-            report.closed_at = report.retention_from = stamp if is_closing else None
+            report.closed_at = stamp if is_closing else None
             report.closed_by = actor.name if is_closing else None
             report.status_before_closing = Status.taken if is_closing else None
             report.delivery = body.delivery if is_closing else None
@@ -330,7 +327,7 @@ class ReportService:
             report.status = Status.closed
             report.note = body.note or None
             report.closed_by = actor.name
-            report.updated_at = report.closed_at = report.retention_from = stamp
+            report.updated_at = report.closed_at = stamp
             return True
 
         report, _ = await self.reports.mutate(report_id, change)
@@ -354,7 +351,7 @@ class ReportService:
                 report.status = Status.taken if report.assignee else Status.sent
             report.note = body.note or (report.note if before == Status.needs_changes else None)
             report.closed_at = report.closed_by = report.status_before_closing = None
-            report.delivery = report.retention_from = None
+            report.delivery = None
             report.delivery_refs = []
             report.updated_at = now()
             return True
@@ -376,7 +373,7 @@ class ReportService:
                 return False
             report.delivery = body.delivery
             report.delivery_refs = list(body.refs)
-            report.updated_at = report.retention_from = now()
+            report.updated_at = now()
             return True
 
         report, changed = await self.reports.mutate(report_id, change)

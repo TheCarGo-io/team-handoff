@@ -1,9 +1,11 @@
 import hashlib
 import secrets
 
-from redis.asyncio import Redis
+from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.redis import key
+from app.models import UserRecord
 from app.schemas.user import User
 
 
@@ -12,40 +14,38 @@ def hash_token(token: str) -> str:
 
 
 class UserRepository:
-    def __init__(self, redis: Redis):
-        self.redis = redis
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]):
+        self.sessions = sessions
 
     async def by_token(self, token: str) -> User | None:
-        name = await self.redis.get(key("token", hash_token(token)))
-        return await self.get(name) if name else None
+        async with self.sessions() as session:
+            record = await session.scalar(select(UserRecord).where(UserRecord.token_hash == hash_token(token)))
+        return User(name=record.name, team=record.team) if record else None
 
     async def get(self, name: str) -> User | None:
-        team = await self.redis.hget(key("users"), name)
-        return User(name=name, team=team) if team else None
+        async with self.sessions() as session:
+            record = await session.get(UserRecord, name)
+        return User(name=record.name, team=record.team) if record else None
 
     async def all(self) -> list[User]:
-        users = await self.redis.hgetall(key("users"))
-        return [User(name=name, team=team) for name, team in sorted(users.items())]
+        async with self.sessions() as session:
+            records = await session.scalars(select(UserRecord).order_by(UserRecord.name))
+            return [User(name=record.name, team=record.team) for record in records]
 
     async def create(self, name: str, team: str) -> str:
         token = f"ho_{secrets.token_urlsafe(32)}"
-        token_hash = hash_token(token)
-        previous = await self.redis.hget(key("user_tokens"), name)
-        async with self.redis.pipeline(transaction=True) as pipe:
-            if previous:
-                pipe.delete(key("token", previous))
-            pipe.hset(key("users"), name, team)
-            pipe.hset(key("user_tokens"), name, token_hash)
-            pipe.set(key("token", token_hash), name)
-            await pipe.execute()
+        await self.store(name, team, hash_token(token))
         return token
 
+    async def store(self, name: str, team: str, token_hash: str) -> None:
+        statement = insert(UserRecord).values(name=name, team=team, token_hash=token_hash)
+        statement = statement.on_conflict_do_update(
+            index_elements=[UserRecord.name], set_={"team": team, "token_hash": token_hash}
+        )
+        async with self.sessions() as session, session.begin():
+            await session.execute(statement)
+
     async def remove(self, name: str) -> bool:
-        previous = await self.redis.hget(key("user_tokens"), name)
-        async with self.redis.pipeline(transaction=True) as pipe:
-            if previous:
-                pipe.delete(key("token", previous))
-            pipe.hdel(key("user_tokens"), name)
-            pipe.hdel(key("users"), name)
-            *_, removed = await pipe.execute()
-        return bool(removed)
+        async with self.sessions() as session, session.begin():
+            result = await session.execute(delete(UserRecord).where(UserRecord.name == name))
+        return result.rowcount > 0

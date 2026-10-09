@@ -22,14 +22,29 @@ jobs:
 
       - name: Ruff lint + format check
         run: |
-          pipx run ruff==0.15.9 check app/ tests/
-          pipx run ruff==0.15.9 format --check app/ tests/
+          pipx run ruff==0.15.9 check app/ tests/ migrations/
+          pipx run ruff==0.15.9 format --check app/ tests/ migrations/
 
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
       PYTHONPATH: .
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/thecargo_handoff_ci
+      DB_USE_NULLPOOL: "true"
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: thecargo_handoff_ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4.2.2
 
