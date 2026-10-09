@@ -125,7 +125,7 @@ tries again after 15 and 30 seconds, then every minute; `[ Retry ]` tries at onc
 | `/handoff:return <id> <what to change>` | Hands it back to the sender as needs-changes |
 | `/handoff:edit <id> <change>` | Updates a report I sent; the receiver is notified |
 | `/handoff:withdraw <id>` | Deletes a report I sent, for everyone |
-| `/handoffs` | Opens the inbox in a side pane: Read a report in full (text and replies), Take, Continue, Fix, Reply, Done, Close (press twice, no model call). Tick `[ ]` on several rows and press "Take N selected" to take them together. `hide` removes a report from your own list and counts only (it stays where it is for everyone else, and sits under "hidden from your list"); Close ends it for everyone, is not offered on a report a teammate holds, and can be undone from the pane or with `/handoff:reopen`. Listing and reading cost no tokens and do not take the report |
+| `/handoffs` | Opens the inbox in a side pane: click a title to read the report in full (text and replies), Take, Continue, Fix, Reply, Done, close (press twice, no model call). Tick `[ ]` on several rows and press "Take N selected" to take them together. `hide` removes a report from your own list and counts only (it stays where it is for everyone else, and sits under "hidden from your list"); Close ends it for everyone, is not offered on a report a teammate holds, and can be undone from the pane or with `/handoff:reopen`. Listing and reading cost no tokens and do not take the report |
 
 Notifications cost no tokens: the plugin holds one `curl` stream to `/api/v1/events` per interactive session
 and draws a toast and a line above the prompt; both can be switched off in `/config`. With the line switched
@@ -135,8 +135,15 @@ prompt box, where you can add to it and press Enter; a draft you were typing is 
 A toast cannot be clicked (Claude Code only lets a click dismiss it); the line above the prompt carries the
 buttons instead: Read, Take, Hide (Open when nothing is new). Keyboard: ctrl+x tab focuses the line, then
 r / t / h / o. Every session of a user shows the same inbox; the pane groups reports as For you, This project,
-Other projects, In progress and Returned, marks the ones that arrived since the pane was last opened, and for
-a report taken on this machine says which project's session took it.
+Other projects, In progress and Returned. A report I hold belongs to the session it was taken in (or where I
+pressed `here`): that session lists it first under "In this session", my other open sessions fold it into "N in
+your other sessions" and leave it out of their counts, and `release` or `here` in another session moves it.
+A session counts as open while its event stream is connected (the stream names the session:
+`/events?session=<id>`) and for `SESSION_GRACE_SECONDS` (90) after it drops; once it is closed, its reports
+show in every session again. The server keeps that list in the memory of its one process. A report is unread (bright, bold, green dot) until I open it — in the pane, with `get` or by
+taking it — and read ones are dimmed; the mark is kept per person on the server, so it is the same in every
+session, and an edit by the sender makes the report unread again. Each row shows when the report arrived:
+minutes while it is under an hour old, the exact local time after that (`14:20`, `Oct 9 14:20`).
 If the stream drops, or goes silent for 60 s (sleep, VPN change), it reconnects with backoff and re-reads the
 inbox; it also re-reads every 10 minutes. The server URL must have no trailing slash.
 
