@@ -1,7 +1,7 @@
 {
   "name": "handoff",
   "displayName": "Team Handoff",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Send, receive and track team handoff reports inside Claude Code",
   "author": { "name": "TheCargo" },
   "types": "./types/index.d.ts",

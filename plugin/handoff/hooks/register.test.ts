@@ -8,6 +8,8 @@ import {
   describeEvent,
   describeContext,
   describeReadiness,
+  describeWhen,
+  heldHere,
   isNewer,
   parseInstall,
   projectOf,
@@ -90,6 +92,8 @@ test('summary is empty when nothing needs attention', () => {
     isLoaded: true,
     isOffline: false,
     offlineSince: null,
+    session: '',
+    unread: 0,
     hiddenRows: [],
     threads: [],
     unreadReplies: 0,
@@ -129,8 +133,21 @@ test('deadlines read as time left or time overdue', () => {
   expect(describeDue('2026-10-08T15:00:00Z', now)).toEqual('due in 5h')
   expect(describeDue('2026-10-11T10:00:00Z', now)).toEqual('due in 3d')
   expect(describeDue('2026-10-08T07:00:00Z', now)).toEqual('overdue by 3h')
-  expect(describeAge('2026-10-08T09:59:50Z', now)).toEqual('just now')
-  expect(describeAge('2026-10-08T08:00:00Z', now)).toEqual('2h ago')
+})
+
+test('times under an hour are relative, older ones are the exact local time', () => {
+  const now = new Date(2026, 9, 10, 15, 30).getTime()
+  const at = (...parts: [number, number, number, number, number, number?]) => new Date(...parts).toISOString()
+
+  expect(describeWhen(at(2026, 9, 10, 15, 29, 40), now)).toEqual('now')
+  expect(describeWhen(at(2026, 9, 10, 14, 31), now)).toEqual('59m')
+  expect(describeWhen(at(2026, 9, 10, 14, 30), now)).toEqual('14:30')
+  expect(describeWhen(at(2026, 9, 10, 0, 5), now)).toEqual('00:05')
+  expect(describeWhen(at(2026, 9, 9, 23, 50), now)).toEqual('Oct 9 23:50')
+  expect(describeWhen(at(2025, 11, 31, 8, 0), now)).toEqual('Dec 31 2025 08:00')
+  expect(describeAge(at(2026, 9, 10, 15, 29, 40), now)).toEqual('just now')
+  expect(describeAge(at(2026, 9, 10, 15, 18), now)).toEqual('12m ago')
+  expect(describeAge(at(2026, 9, 10, 9, 0), now)).toEqual('09:00')
 })
 
 test('the offline line names the local time the server stopped answering', () => {
@@ -294,6 +311,7 @@ const ROW = {
   readiness_note: 'after crm#39',
   items_total: 2,
   items_done: 0,
+  read: false,
 }
 
 const DETAIL = {
@@ -346,6 +364,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
           : JSON.stringify({
               ...INBOX,
               waiting: 1,
+              unread: 1,
               taken_by_me: 0,
               overdue: 0,
               rows: [ROW, { ...ROW, id: 30, title: 'Held by a teammate', status: 'taken', assignee: 'vali' }],
@@ -361,6 +380,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
                   assignee: 'aydos',
                   unread: 2,
                   last_reply_by: 'aydos',
+                  last_reply_at: '2026-10-01T12:00:00Z',
                   last_reply_excerpt: 'Android SHA-1s for package io.thecargo',
                 },
               ],
@@ -420,9 +440,13 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(prompts.at(-1)).toEqual('/handoff:take 50 ')
     prompts.pop()
     expect(
-      await pane.find({ type: 'Text', text: /from backend\/asliddin · 0\/2 done · not live yet: after crm#39 · 2 replies/ }),
+      await pane.find({ type: 'Text', text: /^asliddin · 0\/2 done · not live yet: after crm#39 · 2 replies$/ }),
     ).toBeDefined()
-    expect(await pane.find({ type: 'Text', text: /^●$/ })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: /^· 1 unread$/ })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: /^urgent$/ })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: /^Oct [78] (2026 )?\d\d:\d\d$/ })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: /^Oct [12] (2026 )?\d\d:\d\d$/ })).toBeDefined()
+    expect((await pane.find({ key: 'read-12' }))?.text).toEqual('GET /loads is now paginated')
     await pane.press({ key: 'take-12' })
     expect(prompts).toEqual(['/handoff:take 12 ', '/handoff:take 12 '])
 
@@ -455,7 +479,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
     await pane.press({ key: 'close-12' })
     expect(closes).toEqual([])
-    expect((await pane.find({ key: 'close-12' }))?.text).toEqual('Close? again')
+    expect((await pane.find({ key: 'close-12' }))?.text).toEqual('close? again')
     await pane.press({ key: 'close-12' })
     expect(closes).toEqual(['http://handoff.test/api/v1/reports/12/close'])
 
@@ -587,6 +611,109 @@ test('a request that hangs is given up, shown as offline and retried', { options
 
   await clock.advance(60000)
   expect(calls).toEqual(4)
+})
+
+test('a report I hold lives in the session it was put in, my other sessions tuck it away', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on)
+  const calls: string[] = []
+  const spawned: string[] = []
+  const held = { ...ROW, status: 'taken', assignee: 'ali', read: true, priority: 'normal', readiness: 'ready', items_total: 0, replies: 0 }
+  const web = { label: 'thecargo-frontend', live: true }
+  const box = {
+    ...INBOX,
+    waiting: 0,
+    waiting_for_project: 0,
+    overdue: 0,
+    taken_by_me: 4,
+    rows: [
+      { ...held, id: 21, title: 'AI chat', session: { ...web, id: 'sess-A' } },
+      { ...held, id: 22, title: 'AI settings', session: { ...web, id: 'sess-B' } },
+      { ...held, id: 23, title: 'Call transcript', session: { ...web, id: 'sess-C', live: false } },
+      { ...held, id: 24, title: 'Dialer', session: null },
+    ],
+  }
+
+  on('session.start', ($$, e) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: 'sess-A' }))
+  on('command.register', ($$, e) => ({ value: { command: e.name } }))
+  on('process.run', () => ({
+    value: {
+      exitCode: 0,
+      stdout: 'git@github.com:TheCarGo-io/thecargo-frontend.git\n',
+      stderr: '',
+      isStdoutTruncated: false,
+      isStderrTruncated: false,
+    },
+  }))
+  on('http.fetch', ($$, e) => {
+    if (e.init?.method !== undefined) {
+      calls.push(`${e.init.method} ${e.url} ${e.init.body ?? ''}`.trim())
+    }
+
+    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(box) } }
+  })
+  on('process.spawn', async function* ($$, e) {
+    spawned.push(String(e.input))
+    await new Promise(() => undefined)
+
+    return { value: { code: 0, signal: null } }
+  })
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.render', ($$, e) => h($$.ui.resolve(e).Box, {}) as never)
+  on('tool.call', () => ({ result: {}, text: '{"notice": "data", "id": 31, "status": "taken"}' }) as never)
+
+  await $.session.start(START)
+  await clock.advance(10)
+
+  expect(spawned[0]).toContain('url = "http://handoff.test/api/v1/events?session=sess-A"')
+
+  const band = await $.ui.mount({
+    plugin: 'handoff',
+    surface: 'terminal',
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isWorking: false } as never,
+  })
+
+  expect(await band.find({ type: 'Text', text: /3 in progress/ })).toBeDefined()
+
+  const pane = await $.ui.mount({
+    plugin: 'handoff',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'handoffs',
+    props: { title: 'Handoffs', isFocused: true } as never,
+  })
+  const titles = (await pane.findAll({ type: 'Text' })).map(node => node.text)
+
+  expect(titles.indexOf('In this session')).toBeLessThan(titles.indexOf('In progress'))
+  expect(titles.indexOf('AI chat')).toBeLessThan(titles.indexOf('In progress'))
+  expect(titles).toContain('1 in your other sessions')
+  expect(titles).not.toContain('AI settings')
+  expect(titles).toContain('asliddin · taken by you in another session (thecargo-frontend, closed)')
+  expect(titles).toContain('asliddin · taken by you')
+  expect((await pane.find({ key: 'here-21' }))?.text).toEqual('release')
+  expect(await pane.find({ key: 'hide-21' })).toEqual(undefined)
+
+  await pane.press({ key: 'here-24' })
+  expect(calls.at(-1)).toEqual('PUT http://handoff.test/api/v1/reports/24/session {"session":"sess-A","label":"thecargo-frontend"}')
+  await pane.press({ key: 'here-21' })
+  expect(calls.at(-1)).toEqual('DELETE http://handoff.test/api/v1/reports/21/session')
+
+  expect(await pane.find({ key: 'here-22' })).toEqual(undefined)
+  await pane.press({ key: 'toggle-elsewhere' })
+  await pane.press({ key: 'here-22' })
+  expect(calls.at(-1)).toEqual('PUT http://handoff.test/api/v1/reports/22/session {"session":"sess-A","label":"thecargo-frontend"}')
+
+  await $.tool.call({ tool: 'mcp__plugin_handoff_handoff__take', tool_input: { report_id: 31 } } as never)
+  await clock.settle()
+  expect(calls.at(-1)).toEqual('PUT http://handoff.test/api/v1/reports/31/session {"session":"sess-A","label":"thecargo-frontend"}')
+
+  const state = { ...box, user: 'ali', team: 'frontend', projects: ['thecargo-frontend'], session: 'sess-A', threads: [], takenByMe: 4 }
+
+  expect(heldHere(state as never)).toEqual(3)
+  expect(describeContext(state as never)).toContain('held by ali, for this session: #21 "AI chat" (thecargo-frontend); #23')
+  expect(describeContext(state as never)).toContain('in their other open sessions (leave these to those sessions unless the user names one): #22')
 })
 
 test('handoff commands get the session context attached, other prompts do not', { options: OPTIONS }, async ($, on) => {

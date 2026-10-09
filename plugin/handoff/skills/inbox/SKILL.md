@@ -14,4 +14,4 @@ Show, in this order and leaving out empty parts:
 4. **In progress**: holder and checklist progress (`items_here_done/items_here_total` when given, else `items_done/items_total`).
 5. **Returned to you** (`returned_rows`).
 
-One compact table per part: id, priority, project(s), from, title, due in the user's local time, readiness when not ready. Mark overdue rows. Leave `hidden_rows` out unless asked. Do not open or take anything. End with one line naming the next sensible command, for example `/handoff:take <id>` for a reply or `/handoff:take next`.
+One compact table per part: id, priority, project(s), from, title, due in the user's local time, readiness when not ready. Mark overdue rows, and rows whose `read` is false as unread. Leave `hidden_rows` out unless asked. Do not open or take anything. End with one line naming the next sensible command, for example `/handoff:take <id>` for a reply or `/handoff:take next`.

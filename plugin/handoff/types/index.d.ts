@@ -35,9 +35,11 @@ export type Row = {
   items_here_done?: number | null
   delivery?: 'local' | 'pushed' | 'pr' | 'merged' | null
   related?: number[]
+  read?: boolean | null
+  session?: { id: string; label: string; live: boolean } | null
 }
 
-export type Thread = Row & { unread: number; last_reply_by: string; last_reply_excerpt: string }
+export type Thread = Row & { unread: number; last_reply_by: string; last_reply_at?: string; last_reply_excerpt: string }
 
 export type Detail = Row & {
   text: string
@@ -53,12 +55,14 @@ export type Inbox = {
   isLoaded: boolean
   isOffline: boolean
   offlineSince: number | null
+  session: string
   user: string
   team: string
   project: string
   projects: string[]
   waiting: number
   waitingForProject: number
+  unread: number
   overdue: number
   takenByMe: number
   returned: number
@@ -88,11 +92,10 @@ declare module 'claude-code' {
       inbox: Inbox
       latest: HandoffEvent | null
       view: View
-      seenBefore: number
-      places: Record<string, string>
       confirming: number | null
       selected: number[]
       showHidden: boolean
+      showElsewhere: boolean
       newer: string | null
       lastClosed: number | null
     }

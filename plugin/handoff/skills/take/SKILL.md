@@ -6,7 +6,7 @@ allowed-tools: mcp__plugin_handoff_handoff__take, mcp__plugin_handoff_handoff__g
 
 Pick up handoff work. Request: $ARGUMENTS
 
-A "Handoff context from the plugin" block comes with this prompt: the user, their team, this session's project or projects, what is waiting, what the user holds and which reports have unread replies. Use it instead of looking those up. If the block is missing, call `inbox` first.
+A "Handoff context from the plugin" block comes with this prompt: the user, their team, this session's project or projects, what is waiting, what the user holds and which reports have unread replies. Use it instead of looking those up. If the block is missing, call `inbox` first. A report taken here belongs to this session: the user's other open sessions list it apart, and reports the block names as held in those sessions are theirs unless the user asks for one by id.
 
 **Which reports.**
 - One or several numbers: those reports.

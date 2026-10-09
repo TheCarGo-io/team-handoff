@@ -13,12 +13,14 @@ const EMPTY: Inbox = {
   isLoaded: false,
   isOffline: false,
   offlineSince: null,
+  session: '',
   user: '',
   team: '',
   project: '',
   projects: [],
   waiting: 0,
   waitingForProject: 0,
+  unread: 0,
   overdue: 0,
   takenByMe: 0,
   returned: 0,
@@ -34,13 +36,15 @@ const LIST: View = { id: null, detail: null, problem: '', fresh: 0 }
 const TAKE_TOOL = /^mcp__.*handoff.*__take$/
 const latest = atom({ plugin: 'handoff', key: 'latest' } as const, null)
 const view = atom({ plugin: 'handoff', key: 'view' } as const, LIST)
-const seenBefore = atom({ plugin: 'handoff', key: 'seenBefore' } as const, 0)
-const places = atom({ plugin: 'handoff', key: 'places' } as const, {})
 const confirming = atom({ plugin: 'handoff', key: 'confirming' } as const, null)
 const selected = atom({ plugin: 'handoff', key: 'selected' } as const, [])
 const showHidden = atom({ plugin: 'handoff', key: 'showHidden' } as const, false)
+const showElsewhere = atom({ plugin: 'handoff', key: 'showElsewhere' } as const, false)
 const newer = atom({ plugin: 'handoff', key: 'newer' } as const, null)
 const lastClosed = atom({ plugin: 'handoff', key: 'lastClosed' } as const, null)
+
+export const clip = (text: string, width: number): string =>
+  text.length > width ? `${text.slice(0, Math.max(1, width - 1)).trimEnd()}…` : text
 
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`
 const printable = (text: string) => text.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ')
@@ -108,15 +112,7 @@ export const describeDue = (due: string | null, now: number): string => {
   return minutes < 0 ? `overdue by ${span(-minutes)}` : `due in ${span(minutes)}`
 }
 
-export const describeAge = (stamp: string, now: number): string => {
-  const minutes = Math.max(0, Math.round((now - Date.parse(stamp)) / 60000))
-
-  if (minutes < 1) {
-    return 'just now'
-  }
-
-  return minutes < 90 ? `${minutes}m ago` : minutes < 2880 ? `${Math.round(minutes / 60)}h ago` : `${Math.round(minutes / 1440)}d ago`
-}
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
 export const describeClock = (stamp: number): string => {
   const at = new Date(stamp)
@@ -124,7 +120,38 @@ export const describeClock = (stamp: number): string => {
   return `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
 }
 
+export const describeWhen = (stamp: string, now: number): string => {
+  const then = Date.parse(stamp)
+  const minutes = Math.max(0, Math.floor((now - then) / 60000))
+
+  if (minutes < 60) {
+    return minutes < 1 ? 'now' : `${minutes}m`
+  }
+
+  const at = new Date(then)
+  const clock = describeClock(then)
+
+  if (at.toDateString() === new Date(now).toDateString()) {
+    return clock
+  }
+
+  const day = `${MONTHS[at.getMonth()]} ${at.getDate()}`
+
+  return at.getFullYear() === new Date(now).getFullYear() ? `${day} ${clock}` : `${day} ${at.getFullYear()} ${clock}`
+}
+
+export const describeAge = (stamp: string, now: number): string => {
+  const when = describeWhen(stamp, now)
+
+  return when === 'now' ? 'just now' : /^\d+m$/.test(when) ? `${when} ago` : when
+}
+
 export const describeOffline = (box: Inbox): string => (box.offlineSince ? `offline since ${describeClock(box.offlineSince)}` : 'offline')
+
+export const isElsewhere = (box: Inbox, row: Row): boolean =>
+  row.status === 'taken' && row.assignee === box.user && row.session != null && row.session.live && row.session.id !== box.session
+
+export const heldHere = (box: Inbox): number => box.takenByMe - box.rows.filter(row => isElsewhere(box, row)).length
 
 export const summarize = (box: Inbox): string | undefined => {
   const parts = []
@@ -133,8 +160,8 @@ export const summarize = (box: Inbox): string | undefined => {
     parts.push(`${box.waiting} waiting`)
   }
 
-  if (box.takenByMe > 0) {
-    parts.push(`${box.takenByMe} in progress`)
+  if (heldHere(box) > 0) {
+    parts.push(`${heldHere(box)} in progress`)
   }
 
   if (box.returned > 0) {
@@ -175,13 +202,18 @@ export const describeContext = (box: Inbox): string => {
   const mine = (row: Row) => (row.projects ?? [row.project]).some(name => box.projects.includes(name))
   const brief = (row: Row) => `#${row.id} "${row.title}" (${(row.projects ?? [row.project]).join(', ')})`
   const waiting = box.rows.filter(row => row.status === 'sent')
+  const held = box.rows.filter(row => row.status === 'taken' && row.assignee === box.user)
+  const away = held.filter(row => isElsewhere(box, row))
   const lines = [
     'Handoff context from the plugin, current as of this prompt (use it instead of looking these up):',
     `- user ${box.user}, team ${box.team}`,
     `- this session's ${box.projects.length === 1 ? 'project' : 'projects (a workspace of repositories)'}: ${box.projects.join(', ')}`,
     `- waiting for these projects: ${waiting.filter(mine).map(brief).join('; ') || 'none'}`,
     `- waiting for other projects: ${waiting.filter(row => !mine(row)).map(brief).join('; ') || 'none'}`,
-    `- held by ${box.user}: ${box.rows.filter(row => row.status === 'taken' && row.assignee === box.user).map(brief).join('; ') || 'none'}`,
+    `- held by ${box.user}${away.length > 0 ? ', for this session' : ''}: ${held.filter(row => !away.includes(row)).map(brief).join('; ') || 'none'}`,
+    ...(away.length > 0
+      ? [`- held by ${box.user} in their other open sessions (leave these to those sessions unless the user names one): ${away.map(brief).join('; ')}`]
+      : []),
     `- unread replies: ${box.threads.map(thread => `#${thread.id} (${thread.unread} from ${thread.last_reply_by})`).join('; ') || 'none'}`,
   ]
 
@@ -250,18 +282,16 @@ const draftSkill = async (
 
 let api: { base: string; headers: Record<string, string> } | undefined
 let refreshNow: (() => Promise<void>) | undefined
-let here = ''
 
 const openPane = async ($: EngineInterface) => {
-  const stored = Number((await $.store.get('seenAt').catch(() => 0)) ?? 0)
-  await update($, seenBefore, () => stored)
   await update($, view, () => LIST)
-  void $.store.set('seenAt', Date.now()).catch(() => undefined)
   await $.ui.open({ id: PANE, title: 'Handoffs', focus: true, closeOnEscape: true })
 }
 
 const readReport = async ($: EngineInterface, id: number) => {
-  const fresh = (await read($, inbox)).threads.find(thread => thread.id === id)?.unread ?? 0
+  const box = await read($, inbox)
+  const fresh = box.threads.find(thread => thread.id === id)?.unread ?? 0
+  const isUnread = [...box.rows, ...box.returnedRows, ...box.hiddenRows].some(row => row.id === id && row.read === false)
   await update($, view, () => ({ id, detail: null, problem: '', fresh }))
   const answer =
     api &&
@@ -277,7 +307,7 @@ const readReport = async ($: EngineInterface, id: number) => {
         }
   await update($, view, current => (current.id === id ? shown : current))
 
-  if (fresh > 0) {
+  if (fresh > 0 || isUnread) {
     void refreshNow?.()
   }
 }
@@ -313,15 +343,33 @@ const pressClose = async ($: EngineInterface, id: number) => {
   await refreshNow?.()
 }
 
-const post = async ($: EngineInterface, path: string, method = 'POST') =>
+const post = async ($: EngineInterface, path: string, method = 'POST', body = '{}') =>
   api &&
   (await $.http
     .fetch(`${api.base}/api/v1/reports/${path}`, {
       method,
       headers: { ...api.headers, 'content-type': 'application/json' },
-      body: method === 'POST' ? '{}' : undefined,
+      body: method === 'DELETE' ? undefined : body,
     })
     .catch(() => undefined))
+
+const placeHere = async ($: EngineInterface, id: number | string) => {
+  const box = await read($, inbox)
+
+  return box.session === ''
+    ? undefined
+    : post($, `${id}/session`, 'PUT', JSON.stringify({ session: box.session, label: (box.project || 'session').slice(0, 80) }))
+}
+
+const pressHere = async ($: EngineInterface, id: number, isHere: boolean) => {
+  const answer = isHere ? await placeHere($, id) : await post($, `${id}/session`, 'DELETE')
+
+  if (answer?.ok !== true) {
+    $.ui.toast(`Could not ${isHere ? 'put' : 'release'} #${id} ${isHere ? 'in' : 'from'} this session: the server refused`, { timeoutMs: 6000 })
+  }
+
+  await refreshNow?.()
+}
 
 const pressUndo = async ($: EngineInterface, id: number) => {
   const answer = await post($, `${id}/reopen`)
@@ -434,11 +482,8 @@ export const register: Register = (on, options) => {
     const ran = await next(e)
     const id = /"id":\s*(\d+)/.exec(ran.text ?? '')?.[1]
 
-    if (id !== undefined && ran.isError !== true && here !== '') {
-      const known = { ...(((await $.store.get('places').catch(() => undefined)) as Record<string, string> | undefined) ?? {}), [id]: here }
-      const kept = Object.fromEntries(Object.entries(known).slice(-100))
-      void $.store.set('places', kept).catch(() => undefined)
-      await update($, places, () => kept)
+    if (id !== undefined && ran.isError !== true) {
+      void placeHere($, id).catch(() => undefined)
     }
 
     return ran
@@ -466,6 +511,8 @@ export const register: Register = (on, options) => {
 
     const headers = { Authorization: `Bearer ${token}` }
     api = { base, headers }
+    const session = (await $.session.id().catch(() => '')).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64)
+    await update($, inbox, box => ({ ...box, session }))
     let project = ''
     let projects: string[] = []
     let locatedIn = ''
@@ -487,7 +534,6 @@ export const register: Register = (on, options) => {
         locatedIn = cwd
         projects = projectsOf(remote.stdout, children.stdout, cwd)
         project = projects.length === 1 ? (projects[0] ?? '') : projectOf('', cwd)
-        here = project
       }
     }
 
@@ -547,6 +593,7 @@ export const register: Register = (on, options) => {
         threads?: Thread[]
         waiting: number
         waiting_for_project: number
+        unread?: number
         overdue: number
         taken_by_me: number
         returned: number
@@ -558,12 +605,14 @@ export const register: Register = (on, options) => {
         isLoaded: true,
         isOffline: false,
         offlineSince: null,
+        session,
         user: body.user,
         team: body.team,
         project,
         projects: body.projects && body.projects.length > 0 ? body.projects : projects,
         waiting: body.waiting,
         waitingForProject: body.waiting_for_project,
+        unread: body.unread ?? 0,
         overdue: body.overdue,
         takenByMe: body.taken_by_me,
         returned: body.returned,
@@ -637,7 +686,7 @@ export const register: Register = (on, options) => {
     const listen = async () => {
       const curl = $.process.spawn({
         argv: ['curl', '-sN', '--fail', '--connect-timeout', '10', '--speed-limit', '1', '--speed-time', '60', '-K', '-'],
-        input: `url = "${base}/api/v1/events"\nheader = "Authorization: Bearer ${token}"\n`,
+        input: `url = "${base}/api/v1/events${session === '' ? '' : `?session=${session}`}"\nheader = "Authorization: Bearer ${token}"\n`,
       })
       let rest = ''
 
@@ -653,8 +702,6 @@ export const register: Register = (on, options) => {
     }
 
     const follow = async () => {
-      const stored = (await $.store.get('places').catch(() => undefined)) as Record<string, string> | undefined
-      await update($, places, () => stored ?? {})
       await refresh()
       let wait = 2000
 
@@ -711,7 +758,7 @@ export const register: Register = (on, options) => {
       const elsewhere = box.waiting - box.waitingForProject
       const rest = [
         elsewhere > 0 ? `${elsewhere} ${box.waitingForProject > 0 ? 'elsewhere' : 'waiting'}` : '',
-        box.takenByMe > 0 ? `${box.takenByMe} in progress` : '',
+        heldHere(box) > 0 ? `${heldHere(box)} in progress` : '',
         box.returned > 0 ? `${box.returned} returned` : '',
       ].filter(part => part !== '')
       const replies = box.unreadReplies === 1 ? '1 unread reply' : `${box.unreadReplies} unread replies`
@@ -776,7 +823,6 @@ export const register: Register = (on, options) => {
     const { Box, Button, Markdown, Text } = $.ui.resolve(e)
     const box = await read($, inbox)
     const shown = await read($, view)
-    const taken = await read($, places)
     const now = Date.now()
 
     if (!box.isLoaded) {
@@ -797,20 +843,24 @@ export const register: Register = (on, options) => {
     const canReopen = (row: Row) =>
       (row.status === 'closed' || row.status === 'done' || row.status === 'rejected') &&
       [row.from_user, row.closed_by, row.assignee].includes(box.user)
-    const closer = (row: Row) =>
+    const closer = (row: Row, isQuiet = false) =>
       (row.status === 'sent' || row.status === 'taken' || row.status === 'needs-changes') && !isTeammates(row) ? (
         <Button
           key={`close-${row.id}`}
-          label={armed === row.id ? 'Close? again' : 'Close'}
+          label={armed === row.id ? (isQuiet ? 'close? again' : 'Close? again') : isQuiet ? 'close' : 'Close'}
+          plain={isQuiet ? true : undefined}
           variant={armed === row.id ? 'primary' : 'secondary'}
           dimColor={armed !== row.id}
           onPress={() => void pressClose($, row.id)}
         />
       ) : undefined
+    const isThisSession = (row: Row) => isMine(row) && box.session !== '' && row.session?.id === box.session
     const place = (row: Row) => {
-      const where = taken[String(row.id)]
+      if (!isMine(row) || row.session == null) {
+        return ''
+      }
 
-      return where === undefined ? '' : ` in ${where === box.project ? 'this session\'s folder' : where}`
+      return isThisSession(row) ? ' in this session' : ` in another session (${row.session.label}${row.session.live ? '' : ', closed'})`
     }
 
     const action = (row: Row, isFirst: boolean) => {
@@ -856,7 +906,7 @@ export const register: Register = (on, options) => {
       const rule = '─'.repeat(Math.max(10, Math.min(e.props.bodyColumns - 2, 100)))
       const status =
         report.status === 'taken'
-          ? `taken by ${report.assignee === box.user ? 'you' : report.assignee}${place(report)}`
+          ? `taken by ${report.assignee === box.user ? 'you' : report.assignee}${place(box.rows.find(row => row.id === report.id) ?? report)}`
           : report.status === 'sent'
             ? 'waiting'
             : report.status
@@ -984,15 +1034,17 @@ export const register: Register = (on, options) => {
       )
     }
 
-    const since = await read($, seenBefore)
     const waiting = box.rows.filter(row => row.status === 'sent')
     const forMe = waiting.filter(row => row.to_user === box.user)
     const open = waiting.filter(row => row.to_user !== box.user)
+    const taken = box.rows.filter(row => row.status === 'taken')
+    const away = taken.filter(row => isElsewhere(box, row))
     const groups = [
+      { title: 'In this session', rows: taken.filter(isThisSession) },
       { title: 'For you', rows: forMe },
       { title: `Here · ${hereLabel}`, rows: open.filter(isHere) },
       { title: 'Other projects', rows: open.filter(row => !isHere(row)) },
-      { title: 'In progress', rows: box.rows.filter(row => row.status === 'taken') },
+      { title: 'In progress', rows: taken.filter(row => !isThisSession(row) && !isElsewhere(box, row)) },
       { title: 'Returned to you · needs changes', rows: box.returnedRows },
     ].filter(group => group.rows.length > 0)
     let room = Math.max(2, Math.floor(((e.viewport?.rows ?? 30) - 6 - groups.length * 2) / 2))
@@ -1003,6 +1055,7 @@ export const register: Register = (on, options) => {
     const chosen = picked.filter(id => waiting.some(row => row.id === id))
     const justClosed = await read($, lastClosed)
     const isShowingHidden = await read($, showHidden)
+    const isShowingElsewhere = await read($, showElsewhere)
     const toggle = (id: number) => void update($, selected, ids => (ids.includes(id) ? ids.filter(one => one !== id) : [...ids, id]))
 
     const progress = (row: Row) => {
@@ -1016,15 +1069,16 @@ export const register: Register = (on, options) => {
       return share > 0 && share < (row.items_total ?? 0) ? `${row.items_here_done ?? 0}/${share} here · ${all}` : all
     }
 
+    const isUnread = (row: Row) => row.read === false && !isTeammates(row)
+    const title = (row: Row, when: string) => clip(printable(row.title), Math.max(12, (e.props.bodyColumns || 80) - 14 - when.length))
     const details = (row: Row) =>
       [
-        `from ${row.from_team}/${row.from_user}`,
+        row.from_user,
         isHere(row) && (row.projects ?? []).length < 2 ? '' : (row.projects ?? [row.project]).join(', '),
-        describeDue(row.due, now),
         progress(row),
         describeReadiness(row.readiness, row.readiness_note),
         row.replies > 0 ? `${row.replies} ${row.replies === 1 ? 'reply' : 'replies'}` : '',
-        row.status === 'taken' ? `taken by ${isMine(row) ? 'you' : row.assignee}${place(row)}` : '',
+        row.status !== 'taken' || isThisSession(row) ? '' : `taken by ${isMine(row) ? 'you' : row.assignee}${place(row)}`,
       ]
         .filter(part => part !== '')
         .join(' · ')
@@ -1041,8 +1095,13 @@ export const register: Register = (on, options) => {
         )}
         <Box gap={1}>
           <Text bold>{plural(box.waiting, 'report')} waiting</Text>
+          {box.unread > 0 && (
+            <Text color="success" bold>
+              · {box.unread} unread
+            </Text>
+          )}
           <Text dimColor>
-            · {box.takenByMe} in progress{box.overdue > 0 ? ` · ${box.overdue} overdue` : ''}
+            · {heldHere(box)} in progress{box.overdue > 0 ? ` · ${box.overdue} overdue` : ''}
           </Text>
         </Box>
         {justClosed !== null && (
@@ -1063,16 +1122,29 @@ export const register: Register = (on, options) => {
                   <Box width={1} flexShrink={0}>
                     <Text color="success">●</Text>
                   </Box>
+                  <Box width={3} flexShrink={0} />
                   <Box width={4} flexShrink={0}>
                     <Text bold>#{thread.id}</Text>
                   </Box>
                   <Box flexGrow={1} flexShrink={1}>
-                    <Text bold wrap="truncate-end">
-                      {printable(thread.title)}
+                    <Button key={`read-thread-${thread.id}`} plain onPress={() => void readReport($, thread.id)}>
+                      <Text bold>{title(thread, thread.last_reply_at === undefined ? '' : describeWhen(thread.last_reply_at, now))}</Text>
+                    </Button>
+                  </Box>
+                  {thread.last_reply_at !== undefined && (
+                    <Box flexShrink={0}>
+                      <Text>{describeWhen(thread.last_reply_at, now)}</Text>
+                    </Box>
+                  )}
+                </Box>
+                <Box gap={1}>
+                  <Box width={10} flexShrink={0} />
+                  <Box flexGrow={1} flexShrink={1}>
+                    <Text dimColor wrap="truncate-end">
+                      {printable(`${thread.unread === 1 ? '1 new reply' : `${thread.unread} new replies`} · ${thread.last_reply_by}: ${thread.last_reply_excerpt}`)}
                     </Text>
                   </Box>
-                  <Box gap={1} flexShrink={0}>
-                    <Button key={`read-thread-${thread.id}`} label="Read" onPress={() => void readReport($, thread.id)} />
+                  <Box flexShrink={0}>
                     <Button
                       key={`take-thread-${thread.id}`}
                       label="Take"
@@ -1081,10 +1153,6 @@ export const register: Register = (on, options) => {
                     />
                   </Box>
                 </Box>
-                <Text dimColor wrap="truncate-end">
-                  {'      '}
-                  {printable(`${thread.unread === 1 ? '1 new reply' : `${thread.unread} new replies`} · ${thread.last_reply_by}: ${thread.last_reply_excerpt}`)}
-                </Text>
               </Box>
             ))}
           </Box>
@@ -1123,13 +1191,13 @@ export const register: Register = (on, options) => {
                 {printable(group.title)}
               </Text>
               {rows.map(row => {
-                const isUnread = row.status === 'sent' && Date.parse(row.created_at) > since
+                const isFresh = isUnread(row)
 
                 return (
                   <Box key={`row-${row.id}`} flexDirection="column">
                     <Box gap={1}>
                       <Box width={1} flexShrink={0}>
-                        <Text color="success">{isUnread ? '●' : ' '}</Text>
+                        <Text color="success">{isFresh ? '●' : ' '}</Text>
                       </Box>
                       <Box width={3} flexShrink={0}>
                         {row.status === 'sent' && (
@@ -1143,48 +1211,107 @@ export const register: Register = (on, options) => {
                         )}
                       </Box>
                       <Box width={4} flexShrink={0}>
-                        <Text bold>#{row.id}</Text>
-                      </Box>
-                      <Box width={6} flexShrink={0}>
-                        <Text color={PRIORITY_COLOR[row.priority]} dimColor={(row.readiness ?? 'ready') !== 'ready'}>
-                          {row.priority}
+                        <Text bold={isFresh} dimColor={!isFresh}>
+                          #{row.id}
                         </Text>
                       </Box>
                       <Box flexGrow={1} flexShrink={1}>
-                        <Text bold={isUnread} wrap="truncate-end">
-                          {printable(row.title)}
+                        <Button
+                          key={`read-${row.id}`}
+                          plain
+                          autoFocus={row.id === first ? true : undefined}
+                          onPress={() => void readReport($, row.id)}
+                        >
+                          <Text bold={isFresh} dimColor={!isFresh}>
+                            {title(row, describeWhen(row.created_at, now))}
+                          </Text>
+                        </Button>
+                      </Box>
+                      <Box flexShrink={0}>
+                        <Text dimColor={!isFresh}>{describeWhen(row.created_at, now)}</Text>
+                      </Box>
+                    </Box>
+                    <Box gap={1}>
+                      <Box width={10} flexShrink={0} />
+                      {row.priority !== 'normal' && (
+                        <Box flexShrink={0}>
+                          <Text color={PRIORITY_COLOR[row.priority]} bold={row.priority === 'urgent'}>
+                            {row.priority}
+                          </Text>
+                        </Box>
+                      )}
+                      {row.due !== null && (
+                        <Box flexShrink={0}>
+                          <Text color={row.overdue ? 'error' : undefined} dimColor={!row.overdue}>
+                            {describeDue(row.due, now)}
+                          </Text>
+                        </Box>
+                      )}
+                      <Box flexGrow={1} flexShrink={1}>
+                        <Text dimColor wrap="truncate-end">
+                          {printable(details(row))}
                         </Text>
                       </Box>
                       <Box gap={1} flexShrink={0}>
-                        <Button
-                          key={`read-${row.id}`}
-                          label="Read"
-                          dimColor
-                          autoFocus={row.id === first ? true : undefined}
-                          onPress={() => void readReport($, row.id)}
-                        />
                         {action(row, row.id === first)}
-                        {closer(row)}
-                        {(row.status === 'sent' || row.status === 'taken') && (
+                        {isMine(row) && box.session !== '' && (
+                          <Button
+                            key={`here-${row.id}`}
+                            label={isThisSession(row) ? 'release' : 'here'}
+                            plain
+                            dimColor
+                            onPress={() => void pressHere($, row.id, !isThisSession(row))}
+                          />
+                        )}
+                        {closer(row, true)}
+                        {(row.status === 'sent' || (row.status === 'taken' && !isThisSession(row))) && (
                           <Button key={`hide-${row.id}`} label="hide" plain dimColor onPress={() => void pressHide($, row.id, true)} />
                         )}
                       </Box>
                     </Box>
-                    <Text color={row.overdue ? 'error' : undefined} dimColor={!row.overdue} wrap="truncate-end">
-                      {'                  '}
-                      {printable(details(row))}
-                    </Text>
                   </Box>
                 )
               })}
               {group.rows.length > rows.length && (
                 <Text dimColor>
-                  {'                  '}… {group.rows.length - rows.length} more — /handoff:inbox lists everything
+                  {'           '}… {group.rows.length - rows.length} more — /handoff:inbox lists everything
                 </Text>
               )}
             </Box>
           )
         })}
+        {away.length > 0 && (
+          <Box marginTop={1} flexDirection="column">
+            <Box gap={1}>
+              <Text dimColor>{away.length} in your other sessions</Text>
+              <Button
+                key="toggle-elsewhere"
+                label={isShowingElsewhere ? 'Collapse' : 'Show'}
+                dimColor
+                onPress={() => void update($, showElsewhere, isOn => !isOn)}
+              />
+            </Box>
+            {isShowingElsewhere &&
+              away.map(row => (
+                <Box key={`away-${row.id}`} gap={1}>
+                  <Box width={5} flexShrink={0}>
+                    <Text dimColor>#{row.id}</Text>
+                  </Box>
+                  <Box flexGrow={1} flexShrink={1}>
+                    <Button key={`read-${row.id}`} plain onPress={() => void readReport($, row.id)}>
+                      <Text dimColor>
+                        {clip(printable(row.title), Math.max(12, (e.props.bodyColumns || 80) - 16 - (row.session?.label.length ?? 0)))}
+                      </Text>
+                    </Button>
+                  </Box>
+                  <Box gap={1} flexShrink={0}>
+                    <Text dimColor>{printable(row.session?.label ?? '')}</Text>
+                    <Button key={`here-${row.id}`} label="here" plain dimColor onPress={() => void pressHere($, row.id, true)} />
+                  </Box>
+                </Box>
+              ))}
+          </Box>
+        )}
         {box.hiddenRows.length > 0 && (
           <Box marginTop={1} flexDirection="column">
             <Box gap={1}>
@@ -1203,12 +1330,12 @@ export const register: Register = (on, options) => {
                     <Text dimColor>#{row.id}</Text>
                   </Box>
                   <Box flexGrow={1} flexShrink={1}>
-                    <Text dimColor wrap="truncate-end">
-                      {printable(row.title)}
-                    </Text>
+                    <Button key={`read-${row.id}`} plain onPress={() => void readReport($, row.id)}>
+                      <Text dimColor>{clip(printable(row.title), Math.max(12, (e.props.bodyColumns || 80) - 28))}</Text>
+                    </Button>
                   </Box>
                   <Box gap={1} flexShrink={0}>
-                    <Button key={`read-${row.id}`} label="Read" dimColor onPress={() => void readReport($, row.id)} />
+                    <Text dimColor>{describeWhen(row.created_at, now)}</Text>
                     <Button key={`unhide-${row.id}`} label="unhide" plain dimColor onPress={() => void pressHide($, row.id, false)} />
                   </Box>
                 </Box>
@@ -1216,14 +1343,19 @@ export const register: Register = (on, options) => {
           </Box>
         )}
         <Box marginTop={1}>
-          <Text dimColor>● new since you last looked · [ ] selects several to take together · Read opens it here</Text>
+          <Text dimColor>● not read yet · a title opens the report here · [ ] selects several to take together</Text>
         </Box>
         <Box>
           <Text dimColor>Take on a reply hands the whole thread to Claude to answer or act on</Text>
         </Box>
         <Box>
-          <Text dimColor>hide removes a report from your own list only · Close ends it for everyone (press twice)</Text>
+          <Text dimColor>hide removes a report from your own list only · close ends it for everyone (press twice)</Text>
         </Box>
+        {box.takenByMe > 0 && box.session !== '' && (
+          <Box>
+            <Text dimColor>here keeps a report you hold in this session: your other sessions tuck it away · release undoes it</Text>
+          </Box>
+        )}
       </Box>
     )
   })
