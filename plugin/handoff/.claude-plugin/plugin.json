@@ -1,21 +1,23 @@
 {
   "name": "handoff",
   "displayName": "Team Handoff",
-  "version": "0.6.1",
-  "description": "Send, receive and track team handoff reports inside Claude Code",
-  "author": { "name": "TheCargo" },
+  "version": "0.7.0",
+  "description": "Send, take and track handoff reports between teams, inside Claude Code",
+  "author": {
+    "name": "TheCargo"
+  },
   "types": "./types/index.d.ts",
   "userConfig": {
     "url": {
       "type": "string",
       "title": "Handoff server URL",
-      "description": "Base URL of the team handoff server, without a trailing slash",
+      "description": "Base URL of your team's handoff server, without a trailing slash",
       "required": true
     },
     "token": {
       "type": "string",
       "title": "Personal token",
-      "description": "Your own handoff token (starts with ho_). Ask a backend lead for one",
+      "description": "Your own token (starts with ho_), shown when you joined through an invite link",
       "required": true,
       "sensitive": true
     },

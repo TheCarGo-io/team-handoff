@@ -5,7 +5,7 @@
     {
       "name": "handoff",
       "source": "./plugin/handoff",
-      "description": "Send, receive and track team handoff reports inside Claude Code"
+      "description": "Send, take and track handoff reports between teams, inside Claude Code"
     }
   ]
 }

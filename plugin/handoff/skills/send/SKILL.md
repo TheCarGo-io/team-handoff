@@ -1,14 +1,14 @@
 ---
 description: Send a handoff report to another team from this session's work
 argument-hint: <team> [@person] [what to report] [priority] [due]
-allowed-tools: mcp__plugin_handoff_handoff__send, Bash(date:*), Bash(git log:*), Bash(git status:*), Bash(gh pr view:*), Bash(gh pr list:*)
+allowed-tools: mcp__plugin_handoff_handoff__send, mcp__plugin_handoff_handoff__members, Bash(date:*), Bash(git log:*), Bash(git status:*), Bash(gh pr view:*), Bash(gh pr list:*)
 ---
 
 Send a handoff report with the handoff `send` tool. Request: $ARGUMENTS
 
 A "Handoff context from the plugin" block comes with this prompt: the user, their team, this session's project or projects, what is waiting, what the user holds and which reports have unread replies. Use it instead of looking those up. If the block is missing, call `inbox` first.
 
-**1. Receiver.** The first word is the receiving team; `@name` addresses one person in it. If no team is given, ask which. The server lists the valid teams if the name is wrong.
+**1. Receiver.** The first word is the receiving team; `@name` addresses one person in it. If no team is given, call `members` and ask which. The server lists the valid teams if the name is wrong.
 
 **2. Facts first.** Write from what was actually done in this session and in the code; do not invent endpoints or fields. If the request names something you have no context for, read the code. Find the pull requests behind the change (`gh pr list`, `gh pr view`) and whether each is merged. Say "on dev" only when the PR is merged and you know it deployed, or the user says so. If the code contradicts what the user asked you to report, say so instead of sending.
 

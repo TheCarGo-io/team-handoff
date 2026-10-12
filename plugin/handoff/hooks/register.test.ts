@@ -15,10 +15,11 @@ import {
   projectOf,
   projectsOf,
   summarize,
+  versionProblem,
 } from './register'
 
 const OPTIONS = { url: 'http://handoff.test', token: 'ho_test' }
-const START = { cwd: '/work/thecargo-frontend', surface: 'terminal', isInteractive: true } as const
+const START = { cwd: '/work/web-app', surface: 'terminal', isInteractive: true } as const
 const INBOX = {
   user: 'ali',
   team: 'frontend',
@@ -30,26 +31,27 @@ const INBOX = {
   rows: [],
   returned_rows: [],
 }
+const META = { value: { status: 200, ok: true, headers: {}, text: '{"version":"0.7.0","min_plugin":"0.7.0"}' } }
 const NEW = {
   type: 'new',
   id: 12,
   title: 'GET /loads is now paginated',
-  project: 'thecargo-frontend',
+  project: 'web-app',
   priority: 'urgent',
   by_team: 'backend',
-  by_user: 'asliddin',
+  by_user: 'sam',
   note: '',
   notify: true,
 }
 
 test('project name comes from the git remote, else the folder', () => {
-  expect(projectOf('git@github.com:TheCarGo-io/thecargo-frontend.git\n', '/x/y')).toEqual('thecargo-frontend')
-  expect(projectOf('https://github.com/TheCarGo-io/thecargo-crm', '/x/y')).toEqual('thecargo-crm')
-  expect(projectOf('', '/work/thecargo-mobile/')).toEqual('thecargo-mobile')
+  expect(projectOf('git@github.com:acme/web-app.git\n', '/x/y')).toEqual('web-app')
+  expect(projectOf('https://github.com/acme/crm', '/x/y')).toEqual('crm')
+  expect(projectOf('', '/work/mobile-app/')).toEqual('mobile-app')
 })
 
 test('a URL or token that could alter the curl config is refused', () => {
-  expect(configProblem('https://handoff.thecargo.io', 'ho_Ab-9_x')).toEqual(undefined)
+  expect(configProblem('https://handoff.example.com', 'ho_Ab-9_x')).toEqual(undefined)
   expect(configProblem('http://127.0.0.1:8012', 'ho_x')).toEqual(undefined)
   expect(configProblem('https://h.io"\noutput = "/tmp/x', 'ho_x')).toEqual('the server URL must be a plain http(s) URL')
   expect(configProblem('ftp://h.io', 'ho_x')).toEqual('the server URL must be a plain http(s) URL')
@@ -67,7 +69,7 @@ test('an installed copy knows its marketplace and version, a development copy do
     version: '0.5.0',
   })
   expect(parseInstall('C:\\Users\\a\\.claude\\plugins\\cache\\thecargo\\handoff\\0.5.0\\')?.version).toEqual('0.5.0')
-  expect(parseInstall('/Users/a/development/thecargo-handoff/plugin/handoff')).toEqual(undefined)
+  expect(parseInstall('/Users/a/development/team-handoff/plugin/handoff')).toEqual(undefined)
 })
 
 test('a version is newer only when a number in it is higher', () => {
@@ -79,11 +81,24 @@ test('a version is newer only when a number in it is higher', () => {
   expect(isNewer('', '0.5.0')).toEqual(false)
 })
 
-test('a folder that is not a repository counts the repositories inside it', () => {
-  expect(projectsOf('git@github.com:TheCarGo-io/thecargo-crm.git\n', '', '/x/thecargo-crm-dates')).toEqual(['thecargo-crm'])
-  const children = 'git@github.com:TheCarGo-io/thecargo-auth.git\nhttps://github.com/TheCarGo-io/thecargo-auth\nscratch/\n'
+test('a server or a plugin that is too old is named, anything unknown is left alone', () => {
+  expect(versionProblem({ version: '0.7.0', min_plugin: '0.7.0' }, '0.7.0')).toEqual(undefined)
+  expect(versionProblem({ version: '0.9.2', min_plugin: '0.7.0' }, undefined)).toEqual(undefined)
+  expect(versionProblem({ version: '0.6.1', min_plugin: '0.5.0' }, '0.7.0')).toEqual(
+    'the server is 0.6.1, this plugin needs 0.7.0 or newer: ask your admin to update it',
+  )
+  expect(versionProblem({ version: '0.9.0', min_plugin: '0.8.0' }, '0.7.0')).toEqual(
+    'this plugin is 0.7.0, the server needs 0.8.0 or newer: update the plugin',
+  )
+  expect(versionProblem(undefined, '0.7.0')).toContain('the server is older than this plugin needs (0.7.0)')
+  expect(versionProblem({}, '0.7.0')).toEqual(undefined)
+})
 
-  expect(projectsOf('', children, '/x/thecargo')).toEqual(['thecargo-auth', 'scratch'])
+test('a folder that is not a repository counts the repositories inside it', () => {
+  expect(projectsOf('git@github.com:acme/crm.git\n', '', '/x/crm-dates')).toEqual(['crm'])
+  const children = 'git@github.com:acme/auth.git\nhttps://github.com/acme/auth\nscratch/\n'
+
+  expect(projectsOf('', children, '/x/work')).toEqual(['auth', 'scratch'])
   expect(projectsOf('', '', '/x/Projects')).toEqual(['Projects'])
 })
 
@@ -111,7 +126,7 @@ test('summary is empty when nothing needs attention', () => {
 
 test('event lines name the report, the actor and the note', () => {
   expect(describeEvent(NEW as never)).toEqual(
-    'New handoff #12 (urgent) from backend/asliddin: GET /loads is now paginated',
+    'New handoff #12 (urgent) from backend/sam: GET /loads is now paginated',
   )
   expect(describeEvent({ ...NEW, type: 'done', by_team: 'frontend', by_user: 'ali', note: 'PR #88' } as never)).toEqual(
     'Handoff #12 done by frontend/ali: PR #88',
@@ -167,13 +182,17 @@ test('session start loads the inbox for this project and shows the count', { opt
   on('process.run', () => ({
     value: {
       exitCode: 0,
-      stdout: 'git@github.com:TheCarGo-io/thecargo-frontend.git\n',
+      stdout: 'git@github.com:acme/web-app.git\n',
       stderr: '',
       isStdoutTruncated: false,
       isStderrTruncated: false,
     },
   }))
   on('http.fetch', ($$, e) => {
+    if (e.url.endsWith('/api/v1/meta')) {
+      return META
+    }
+
     fetched.push({ url: e.url, auth: e.init?.headers?.Authorization })
 
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(INBOX) } }
@@ -201,7 +220,7 @@ test('session start loads the inbox for this project and shows the count', { opt
   await clock.advance(10)
 
   expect(fetched[0]).toEqual({
-    url: 'http://handoff.test/api/v1/inbox?project=thecargo-frontend',
+    url: 'http://handoff.test/api/v1/inbox?project=web-app',
     auth: 'Bearer ho_test',
   })
   expect(statuses).toEqual(statuses.map(() => undefined))
@@ -209,7 +228,7 @@ test('session start loads the inbox for this project and shows the count', { opt
     'curl -sN --fail --connect-timeout 10 --speed-limit 1 --speed-time 60 -K -|url = "http://handoff.test/api/v1/events"\nheader = "Authorization: Bearer ho_test"\n',
   )
   expect(toasts).toEqual([
-    'New handoff #12 (urgent) from backend/asliddin: GET /loads is now paginated',
+    'New handoff #12 (urgent) from backend/sam: GET /loads is now paginated',
   ])
   expect(fetched.length).toBeGreaterThan(2)
 })
@@ -294,9 +313,9 @@ test('a bad server URL is reported instead of being handed to curl', { options: 
 const ROW = {
   id: 12,
   title: 'GET /loads is now paginated',
-  project: 'thecargo-frontend',
+  project: 'web-app',
   from_team: 'backend',
-  from_user: 'asliddin',
+  from_user: 'sam',
   to_team: 'frontend',
   to_user: null,
   created_at: '2026-10-08T09:00:00Z',
@@ -335,7 +354,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     on('process.run', () => ({
       value: {
         exitCode: 0,
-        stdout: 'git@github.com:TheCarGo-io/thecargo-frontend.git\n',
+        stdout: 'git@github.com:acme/web-app.git\n',
         stderr: '',
         isStdoutTruncated: false,
         isStderrTruncated: false,
@@ -377,11 +396,11 @@ for (const surface of ['terminal', 'desktop'] as const) {
                   title: 'Google sign-in in the app',
                   from_user: 'ali',
                   status: 'taken',
-                  assignee: 'aydos',
+                  assignee: 'omar',
                   unread: 2,
-                  last_reply_by: 'aydos',
+                  last_reply_by: 'omar',
                   last_reply_at: '2026-10-01T12:00:00Z',
-                  last_reply_excerpt: 'Android SHA-1s for package io.thecargo',
+                  last_reply_excerpt: 'Android SHA-1s for package com.example.app',
                 },
               ],
             }),
@@ -418,7 +437,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     })
 
     expect(
-      await band.find({ type: 'Text', text: /New handoff #12 \(urgent\) from backend\/asliddin: GET \/loads/ }),
+      await band.find({ type: 'Text', text: /New handoff #12 \(urgent\) from backend\/sam: GET \/loads/ }),
     ).toBeDefined()
     await band.press({ key: 'take' })
     expect(prompts).toEqual(['/handoff:take 12 '])
@@ -431,16 +450,16 @@ for (const surface of ['terminal', 'desktop'] as const) {
       props: { title: 'Handoffs', isFocused: true } as never,
     })
 
-    expect(await pane.find({ type: 'Text', text: /Here · thecargo-frontend/ })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: /Here · web-app/ })).toBeDefined()
     expect(await pane.find({ type: 'Text', text: /^Replies for you$/ })).toBeDefined()
     expect(
-      await pane.find({ type: 'Text', text: /2 new replies · aydos: Android SHA-1s for package io\.thecargo/ }),
+      await pane.find({ type: 'Text', text: /2 new replies · omar: Android SHA-1s for package com\.example\.app/ }),
     ).toBeDefined()
     await pane.press({ key: 'take-thread-50' })
     expect(prompts.at(-1)).toEqual('/handoff:take 50 ')
     prompts.pop()
     expect(
-      await pane.find({ type: 'Text', text: /^asliddin · 0\/2 done · not live yet: after crm#39 · 2 replies$/ }),
+      await pane.find({ type: 'Text', text: /^sam · 0\/2 done · not live yet: after crm#39 · 2 replies$/ }),
     ).toBeDefined()
     expect(await pane.find({ type: 'Text', text: /^· 1 unread$/ })).toBeDefined()
     expect(await pane.find({ type: 'Text', text: /^urgent$/ })).toBeDefined()
@@ -451,7 +470,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(prompts).toEqual(['/handoff:take 12 ', '/handoff:take 12 '])
 
     await pane.press({ key: 'read-12' })
-    expect(await pane.find({ type: 'Text', text: /^backend\/asliddin$/ })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: /^backend\/sam$/ })).toBeDefined()
     expect(await pane.find({ type: 'Text', text: /^ URGENT $/ })).toBeDefined()
     expect((await pane.find({ type: 'Markdown' }))?.text).toContain('Use `?page` and `?size`.')
     expect(await pane.find({ type: 'Text', text: /Checklist · 0\/2 done/ })).toBeDefined()
@@ -557,7 +576,11 @@ test('a request that hangs is given up, shown as offline and retried', { options
   on('process.run', () => ({
     value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
   }))
-  on('http.fetch', async () => {
+  on('http.fetch', async ($$, e) => {
+    if (e.url.endsWith('/api/v1/meta')) {
+      return META
+    }
+
     calls += 1
     const call = calls
 
@@ -618,7 +641,7 @@ test('a report I hold lives in the session it was put in, my other sessions tuck
   const calls: string[] = []
   const spawned: string[] = []
   const held = { ...ROW, status: 'taken', assignee: 'ali', read: true, priority: 'normal', readiness: 'ready', items_total: 0, replies: 0 }
-  const web = { label: 'thecargo-frontend', live: true }
+  const web = { label: 'web-app', live: true }
   const box = {
     ...INBOX,
     waiting: 0,
@@ -639,7 +662,7 @@ test('a report I hold lives in the session it was put in, my other sessions tuck
   on('process.run', () => ({
     value: {
       exitCode: 0,
-      stdout: 'git@github.com:TheCarGo-io/thecargo-frontend.git\n',
+      stdout: 'git@github.com:acme/web-app.git\n',
       stderr: '',
       isStdoutTruncated: false,
       isStderrTruncated: false,
@@ -690,36 +713,36 @@ test('a report I hold lives in the session it was put in, my other sessions tuck
   expect(titles.indexOf('AI chat')).toBeLessThan(titles.indexOf('In progress'))
   expect(titles).toContain('1 in your other sessions')
   expect(titles).not.toContain('AI settings')
-  expect(titles).toContain('asliddin · taken by you in another session (thecargo-frontend, closed)')
-  expect(titles).toContain('asliddin · taken by you')
+  expect(titles).toContain('sam · taken by you in another session (web-app, closed)')
+  expect(titles).toContain('sam · taken by you')
   expect((await pane.find({ key: 'here-21' }))?.text).toEqual('release')
   expect(await pane.find({ key: 'hide-21' })).toEqual(undefined)
 
   await pane.press({ key: 'here-24' })
-  expect(calls.at(-1)).toEqual('PUT http://handoff.test/api/v1/reports/24/session {"session":"sess-A","label":"thecargo-frontend"}')
+  expect(calls.at(-1)).toEqual('PUT http://handoff.test/api/v1/reports/24/session {"session":"sess-A","label":"web-app"}')
   await pane.press({ key: 'here-21' })
   expect(calls.at(-1)).toEqual('DELETE http://handoff.test/api/v1/reports/21/session')
 
   expect(await pane.find({ key: 'here-22' })).toEqual(undefined)
   await pane.press({ key: 'toggle-elsewhere' })
   await pane.press({ key: 'here-22' })
-  expect(calls.at(-1)).toEqual('PUT http://handoff.test/api/v1/reports/22/session {"session":"sess-A","label":"thecargo-frontend"}')
+  expect(calls.at(-1)).toEqual('PUT http://handoff.test/api/v1/reports/22/session {"session":"sess-A","label":"web-app"}')
 
   await $.tool.call({ tool: 'mcp__plugin_handoff_handoff__take', tool_input: { report_id: 31 } } as never)
   await clock.settle()
-  expect(calls.at(-1)).toEqual('PUT http://handoff.test/api/v1/reports/31/session {"session":"sess-A","label":"thecargo-frontend"}')
+  expect(calls.at(-1)).toEqual('PUT http://handoff.test/api/v1/reports/31/session {"session":"sess-A","label":"web-app"}')
 
-  const state = { ...box, user: 'ali', team: 'frontend', projects: ['thecargo-frontend'], session: 'sess-A', threads: [], takenByMe: 4 }
+  const state = { ...box, user: 'ali', team: 'frontend', projects: ['web-app'], session: 'sess-A', threads: [], takenByMe: 4 }
 
   expect(heldHere(state as never)).toEqual(3)
-  expect(describeContext(state as never)).toContain('held by ali, for this session: #21 "AI chat" (thecargo-frontend); #23')
+  expect(describeContext(state as never)).toContain('held by ali, for this session: #21 "AI chat" (web-app); #23')
   expect(describeContext(state as never)).toContain('in their other open sessions (leave these to those sessions unless the user names one): #22')
 })
 
 test('handoff commands get the session context attached, other prompts do not', { options: OPTIONS }, async ($, on) => {
   const clock = mock.clock(on)
   const seen: (readonly string[] | undefined)[] = []
-  const box = { ...INBOX, rows: [ROW], threads: [{ ...ROW, id: 50, unread: 1, last_reply_by: 'aydos', last_reply_excerpt: 'x' }] }
+  const box = { ...INBOX, rows: [ROW], threads: [{ ...ROW, id: 50, unread: 1, last_reply_by: 'omar', last_reply_excerpt: 'x' }] }
 
   on('session.start', ($$, e) => ({ cwd: e.cwd }))
   on('command.register', ($$, e) => ({ value: { command: e.name } }))
@@ -747,9 +770,9 @@ test('handoff commands get the session context attached, other prompts do not', 
   expect(seen[0]).toEqual(undefined)
   expect(seen[1]?.length).toEqual(1)
   expect(seen[1]?.[0]).toContain('user ali, team frontend')
-  expect(seen[1]?.[0]).toContain("this session's project: thecargo-frontend")
-  expect(seen[1]?.[0]).toContain('waiting for these projects: #12 "GET /loads is now paginated" (thecargo-frontend)')
-  expect(seen[1]?.[0]).toContain('unread replies: #50 (1 from aydos)')
+  expect(seen[1]?.[0]).toContain("this session's project: web-app")
+  expect(seen[1]?.[0]).toContain('waiting for these projects: #12 "GET /loads is now paginated" (web-app)')
+  expect(seen[1]?.[0]).toContain('unread replies: #50 (1 from omar)')
   const workspace = { projects: ['a', 'b'], rows: [], threads: [], user: 'ali', team: 'frontend' }
 
   expect(describeContext(workspace as never)).toContain(

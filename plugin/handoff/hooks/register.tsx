@@ -9,6 +9,7 @@ const UPDATE_CHECK_MS = 3 * 60 * 60 * 1000
 const LOAD_TIMEOUT_MS = 20000
 const RETRY_FIRST_MS = 15000
 const RETRY_MAX_MS = 60000
+const NEEDS_SERVER = '0.7.0'
 const EMPTY: Inbox = {
   isLoaded: false,
   isOffline: false,
@@ -195,8 +196,46 @@ export const projectsOf = (remote: string, children: string, cwd: string): strin
   return names.length > 0 ? [...new Set(names)].slice(0, 150) : [projectOf('', cwd)]
 }
 
-const WORKSPACE_SCAN =
-  'for d in */; do [ -e "$d.git" ] && { git -C "$d" remote get-url origin 2>/dev/null || echo "$d"; }; done'
+export const versionProblem = (
+  server: { version?: unknown; min_plugin?: unknown } | undefined,
+  plugin: string | undefined,
+): string | undefined => {
+  if (server === undefined) {
+    return `the server is older than this plugin needs (${NEEDS_SERVER}): ask your admin to update it`
+  }
+
+  if (typeof server.version !== 'string' || typeof server.min_plugin !== 'string') {
+    return undefined
+  }
+
+  if (isNewer(NEEDS_SERVER, server.version)) {
+    return `the server is ${server.version}, this plugin needs ${NEEDS_SERVER} or newer: ask your admin to update it`
+  }
+
+  return plugin !== undefined && isNewer(server.min_plugin, plugin)
+    ? `this plugin is ${plugin}, the server needs ${server.min_plugin} or newer: update the plugin`
+    : undefined
+}
+
+const scanWorkspace = async ($: EngineInterface, cwd: string): Promise<string> => {
+  const entries = await $.fs.list(cwd).catch(() => [])
+  const found: string[] = []
+
+  for (const entry of entries.filter(one => one.kind === 'dir').slice(0, 200)) {
+    if (found.length >= 150) {
+      break
+    }
+
+    const folder = `${cwd.replace(/[/\\]+$/, '')}/${entry.name}`
+
+    if (await $.fs.exists(`${folder}/.git`).catch(() => false)) {
+      const remote = await $.process.run(['git', '-C', folder, 'remote', 'get-url', 'origin']).catch(() => ({ stdout: '' }))
+      found.push(remote.stdout.trim() || entry.name)
+    }
+  }
+
+  return found.join('\n')
+}
 
 export const describeContext = (box: Inbox): string => {
   const mine = (row: Row) => (row.projects ?? [row.project]).some(name => box.projects.includes(name))
@@ -490,6 +529,16 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('session.start', async ($, e, next) => {
+    if (e.isInteractive && configProblem(String(options.url ?? ''), String(options.token ?? '')) === undefined) {
+      const id = (await $.session.id().catch(() => '')).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64)
+
+      if (id !== '') {
+        void $.http
+          .fetch(`${String(options.url)}/api/v1/sessions/${id}`, { method: 'PUT', headers: { Authorization: `Bearer ${String(options.token)}` } })
+          .catch(() => undefined)
+      }
+    }
+
     const started = await next(e)
 
     await $.command.register({ name: PANE, description: 'Show my team handoff inbox in a pane (no model call)' })
@@ -511,6 +560,16 @@ export const register: Register = (on, options) => {
 
     const headers = { Authorization: `Bearer ${token}` }
     api = { base, headers }
+    void $.http
+      .fetch(`${base}/api/v1/meta`)
+      .then(answer => {
+        const mismatch = versionProblem(answer.ok ? JSON.parse(answer.text) : answer.status === 404 ? undefined : {}, parseInstall($.plugin.root)?.version)
+
+        if (mismatch !== undefined) {
+          $.ui.toast(`Handoff: ${mismatch}.`, { timeoutMs: 12000 })
+        }
+      })
+      .catch(() => undefined)
     const session = (await $.session.id().catch(() => '')).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64)
     await update($, inbox, box => ({ ...box, session }))
     let project = ''
@@ -527,12 +586,9 @@ export const register: Register = (on, options) => {
 
       if (cwd !== locatedIn) {
         const remote = await $.process.run(['git', 'remote', 'get-url', 'origin'], { cwd }).catch(() => ({ stdout: '' }))
-        const children =
-          remote.stdout.trim() === ''
-            ? await $.process.run(['sh', '-c', WORKSPACE_SCAN], { cwd }).catch(() => ({ stdout: '' }))
-            : { stdout: '' }
+        const children = remote.stdout.trim() === '' ? await scanWorkspace($, cwd) : ''
         locatedIn = cwd
-        projects = projectsOf(remote.stdout, children.stdout, cwd)
+        projects = projectsOf(remote.stdout, children, cwd)
         project = projects.length === 1 ? (projects[0] ?? '') : projectOf('', cwd)
       }
     }

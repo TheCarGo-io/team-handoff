@@ -10,7 +10,7 @@ A "Handoff context from the plugin" block comes with this prompt: the user, thei
 
 Group the rows by project; a report whose `projects` names several repositories appears under each. Start with one summary line per project, most active first, for example:
 
-`thecargo-frontend: 2 waiting, 1 in progress (aydos, 3/5), 1 built but not merged`
+`web-app: 2 waiting, 1 in progress (sam, 3/5), 1 built but not merged`
 
 Then, per project, short lists in this order, leaving out empty ones:
 - **Waiting**: id, title, from, age, and what it waits for when `readiness` is not ready.

@@ -1,1 +1,18 @@
-{ "modules": ["./register.tsx"] }
+{
+  "modules": [
+    "./register.tsx"
+  ],
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl -sf -m 6 -X POST -H \"Authorization: Bearer $CLAUDE_PLUGIN_OPTION_TOKEN\" -H 'content-type: application/json' --data-binary @- \"$CLAUDE_PLUGIN_OPTION_URL/api/v1/hooks/session-start\" || true",
+            "timeout": 8
+          }
+        ]
+      }
+    ]
+  }
+}
