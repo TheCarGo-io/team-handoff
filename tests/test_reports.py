@@ -20,10 +20,10 @@ async def test_requests_without_a_valid_token_are_refused(client, tokens):
 
 
 async def test_sent_report_lands_in_the_receiving_teams_inbox_only(client, tokens):
-    report = await send(client, tokens["asliddin"])
-    assert report["status"] == "sent" and report["from_user"] == "asliddin" and report["version"] == 1
+    report = await send(client, tokens["sam"])
+    assert report["status"] == "sent" and report["from_user"] == "sam" and report["version"] == 1
 
-    frontend = (await client.get("/api/v1/inbox?project=thecargo-frontend", headers=tokens["ali"])).json()
+    frontend = (await client.get("/api/v1/inbox?project=web-app", headers=tokens["ali"])).json()
     assert frontend["waiting"] == 1 and frontend["waiting_for_project"] == 1
     assert [row["id"] for row in frontend["rows"]] == [report["id"]]
     assert "text" not in frontend["rows"][0]
@@ -35,10 +35,10 @@ async def test_sent_report_lands_in_the_receiving_teams_inbox_only(client, token
 async def test_inbox_orders_by_priority_then_deadline_then_age_and_marks_overdue(client, tokens):
     soon = (datetime.now(UTC) + timedelta(hours=2)).isoformat()
     past = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
-    normal_old = await send(client, tokens["asliddin"], title="normal old")
-    normal_due = await send(client, tokens["asliddin"], title="normal due", due=soon)
-    urgent = await send(client, tokens["asliddin"], title="urgent one", priority="urgent")
-    high_overdue = await send(client, tokens["asliddin"], title="high overdue", priority="high", due=past)
+    normal_old = await send(client, tokens["sam"], title="normal old")
+    normal_due = await send(client, tokens["sam"], title="normal due", due=soon)
+    urgent = await send(client, tokens["sam"], title="urgent one", priority="urgent")
+    high_overdue = await send(client, tokens["sam"], title="high overdue", priority="high", due=past)
 
     inbox = (await client.get("/api/v1/inbox", headers=tokens["ali"])).json()
     assert [row["id"] for row in inbox["rows"]] == [
@@ -52,41 +52,39 @@ async def test_inbox_orders_by_priority_then_deadline_then_age_and_marks_overdue
 
 
 async def test_unknown_team_and_foreign_recipient_are_rejected(client, tokens):
-    response = await client.post("/api/v1/reports", json=report_body(to_team="sales"), headers=tokens["asliddin"])
+    response = await client.post("/api/v1/reports", json=report_body(to_team="sales"), headers=tokens["sam"])
     assert response.status_code == 400
-    response = await client.post("/api/v1/reports", json=report_body(to_user="dana"), headers=tokens["asliddin"])
+    response = await client.post("/api/v1/reports", json=report_body(to_user="dana"), headers=tokens["sam"])
     assert response.status_code == 400
 
 
 async def test_project_must_be_a_known_one_when_a_list_is_configured(client, tokens, monkeypatch):
-    monkeypatch.setattr(settings, "PROJECTS", ["thecargo-frontend", "thecargo-mobile"])
-    wrong = await client.post("/api/v1/reports", json=report_body(project="frontend"), headers=tokens["asliddin"])
-    assert wrong.status_code == 400 and "thecargo-mobile" in wrong.json()["detail"]
-    await send(client, tokens["asliddin"], project="thecargo-mobile")
+    monkeypatch.setattr(settings, "PROJECTS", ["web-app", "mobile-app"])
+    wrong = await client.post("/api/v1/reports", json=report_body(project="frontend"), headers=tokens["sam"])
+    assert wrong.status_code == 400 and "mobile-app" in wrong.json()["detail"]
+    await send(client, tokens["sam"], project="mobile-app")
 
 
 async def test_invalid_fields_are_refused_in_the_common_error_shape(client, tokens):
-    naive = await client.post(
-        "/api/v1/reports", json=report_body(due="2026-10-09T18:00:00"), headers=tokens["asliddin"]
-    )
+    naive = await client.post("/api/v1/reports", json=report_body(due="2026-10-09T18:00:00"), headers=tokens["sam"])
     assert naive.status_code == 422
     assert naive.json()["code"] == "validation_error" and naive.json()["detail"].startswith("due:")
-    spaced = await client.post("/api/v1/reports", json=report_body(project="the cargo"), headers=tokens["asliddin"])
+    spaced = await client.post("/api/v1/reports", json=report_body(project="the cargo"), headers=tokens["sam"])
     assert spaced.status_code == 422
-    blank = await client.post("/api/v1/reports", json=report_body(text=" \n\t "), headers=tokens["asliddin"])
+    blank = await client.post("/api/v1/reports", json=report_body(text=" \n\t "), headers=tokens["sam"])
     assert blank.status_code == 422
 
 
 async def test_deadline_is_stored_in_utc_and_control_characters_are_stripped(client, tokens):
     report = await send(
-        client, tokens["asliddin"], due="2026-10-09T18:00:00+05:00", title="Loads\x1b[31m paged\n", text="a\x00b\r\nc"
+        client, tokens["sam"], due="2026-10-09T18:00:00+05:00", title="Loads\x1b[31m paged\n", text="a\x00b\r\nc"
     )
     assert report["due"] == "2026-10-09T13:00:00Z"
     assert report["title"] == "Loads [31m paged" and report["text"] == "ab\nc"
 
 
 async def test_only_one_of_two_simultaneous_takes_wins(client, tokens):
-    report = await send(client, tokens["asliddin"])
+    report = await send(client, tokens["sam"])
     url = f"/api/v1/reports/{report['id']}/take"
     first, second = await asyncio.gather(
         client.post(url, headers=tokens["ali"]), client.post(url, headers=tokens["vali"])
@@ -99,7 +97,7 @@ async def test_only_one_of_two_simultaneous_takes_wins(client, tokens):
 
 
 async def test_take_is_limited_to_the_receiving_team_and_repeatable_by_the_holder(client, tokens):
-    report = await send(client, tokens["asliddin"])
+    report = await send(client, tokens["sam"])
     url = f"/api/v1/reports/{report['id']}/take"
     assert (await client.post(url, headers=tokens["dana"])).status_code == 403
     first = await client.post(url, headers=tokens["ali"])
@@ -109,18 +107,18 @@ async def test_take_is_limited_to_the_receiving_team_and_repeatable_by_the_holde
 
 
 async def test_take_next_follows_inbox_order_and_project_filter(client, tokens):
-    await send(client, tokens["asliddin"], title="mobile thing", project="thecargo-mobile", priority="urgent")
-    web = await send(client, tokens["asliddin"], title="web thing")
+    await send(client, tokens["sam"], title="mobile thing", project="mobile-app", priority="urgent")
+    web = await send(client, tokens["sam"], title="web thing")
 
-    taken = await client.post("/api/v1/reports/take-next?project=thecargo-frontend", headers=tokens["ali"])
+    taken = await client.post("/api/v1/reports/take-next?project=web-app", headers=tokens["ali"])
     assert taken.json()["id"] == web["id"] and taken.json()["text"]
-    empty = await client.post("/api/v1/reports/take-next?project=thecargo-frontend", headers=tokens["ali"])
+    empty = await client.post("/api/v1/reports/take-next?project=web-app", headers=tokens["ali"])
     assert empty.status_code == 404
 
 
 async def test_take_next_leaves_reports_addressed_to_a_teammate(client, tokens):
-    for_vali = await send(client, tokens["asliddin"], to_user="vali", priority="urgent")
-    open_one = await send(client, tokens["asliddin"], title="for anyone")
+    for_vali = await send(client, tokens["sam"], to_user="vali", priority="urgent")
+    open_one = await send(client, tokens["sam"], title="for anyone")
 
     assert (await client.post("/api/v1/reports/take-next", headers=tokens["ali"])).json()["id"] == open_one["id"]
     assert (await client.post("/api/v1/reports/take-next", headers=tokens["ali"])).status_code == 404
@@ -128,7 +126,7 @@ async def test_take_next_leaves_reports_addressed_to_a_teammate(client, tokens):
 
 
 async def test_done_closes_the_report(client, tokens):
-    report = await send(client, tokens["asliddin"])
+    report = await send(client, tokens["sam"])
 
     await client.post(f"/api/v1/reports/{report['id']}/take", headers=tokens["ali"])
     body = {"status": "done", "note": "PR #88"}
@@ -144,35 +142,33 @@ async def test_done_closes_the_report(client, tokens):
 
 
 async def test_needs_changes_returns_to_the_sender_and_an_edit_resends_it(client, tokens):
-    report = await send(client, tokens["asliddin"])
+    report = await send(client, tokens["sam"])
     rid = report["id"]
     await client.post(f"/api/v1/reports/{rid}/take", headers=tokens["ali"])
     body = {"status": "needs-changes", "note": "which sort fields?"}
     await client.post(f"/api/v1/reports/{rid}/resolve", json=body, headers=tokens["ali"])
 
-    sender = (await client.get("/api/v1/inbox", headers=tokens["asliddin"])).json()
+    sender = (await client.get("/api/v1/inbox", headers=tokens["sam"])).json()
     assert sender["returned"] == 1 and sender["returned_rows"][0]["id"] == rid
 
     forbidden = await client.patch(f"/api/v1/reports/{rid}", json={"text": "hijack"}, headers=tokens["bobur"])
     assert forbidden.status_code == 403
 
-    edited = await client.patch(
-        f"/api/v1/reports/{rid}", json={"text": "Sort by created_at."}, headers=tokens["asliddin"]
-    )
+    edited = await client.patch(f"/api/v1/reports/{rid}", json={"text": "Sort by created_at."}, headers=tokens["sam"])
     assert edited.json()["version"] == 2 and edited.json()["status"] == "sent" and edited.json()["assignee"] is None
     assert edited.json()["text"] == "Sort by created_at." and edited.json()["note"] is None
     assert (await client.get("/api/v1/inbox", headers=tokens["ali"])).json()["waiting"] == 1
 
 
 async def test_closed_report_cannot_be_edited(client, tokens):
-    report = await send(client, tokens["asliddin"])
+    report = await send(client, tokens["sam"])
     await client.post(f"/api/v1/reports/{report['id']}/close", json={"note": "duplicate"}, headers=tokens["ali"])
-    response = await client.patch(f"/api/v1/reports/{report['id']}", json={"text": "x"}, headers=tokens["asliddin"])
+    response = await client.patch(f"/api/v1/reports/{report['id']}", json={"text": "x"}, headers=tokens["sam"])
     assert response.status_code == 409
 
 
 async def test_replies_are_limited_to_the_two_teams_involved(client, tokens):
-    report = await send(client, tokens["asliddin"])
+    report = await send(client, tokens["sam"])
     url = f"/api/v1/reports/{report['id']}/replies"
     assert (await client.post(url, json={"text": "hi"}, headers=tokens["dana"])).status_code == 403
     replied = await client.post(url, json={"text": "is total exact?"}, headers=tokens["ali"])
@@ -181,8 +177,8 @@ async def test_replies_are_limited_to_the_two_teams_involved(client, tokens):
 
 
 async def test_closed_reports_leave_the_lists_after_two_weeks_but_are_never_deleted(client, tokens, database):
-    recent = await send(client, tokens["asliddin"], title="closed yesterday")
-    old = await send(client, tokens["asliddin"], title="closed last month")
+    recent = await send(client, tokens["sam"], title="closed yesterday")
+    old = await send(client, tokens["sam"], title="closed last month")
     for report in (recent, old):
         await client.post(f"/api/v1/reports/{report['id']}/resolve", json={"status": "done"}, headers=tokens["ali"])
     aged = "update reports set closed_at = now() - interval '30 days', updated_at = now() - interval '30 days'"
@@ -194,26 +190,26 @@ async def test_closed_reports_leave_the_lists_after_two_weeks_but_are_never_dele
     assert [row["id"] for row in archive] == [recent["id"], old["id"]]
 
     assert (await client.get(f"/api/v1/reports/{old['id']}", headers=tokens["ali"])).json()["text"]
-    reopened = await client.post(f"/api/v1/reports/{old['id']}/reopen", headers=tokens["asliddin"])
+    reopened = await client.post(f"/api/v1/reports/{old['id']}/reopen", headers=tokens["sam"])
     assert reopened.json()["status"] == "taken"
     assert old["id"] in [row["id"] for row in (await client.get("/api/v1/board", headers=tokens["ali"])).json()]
 
 
 async def test_an_old_closed_report_comes_back_into_view_when_someone_replies(client, tokens, database):
-    report = await send(client, tokens["asliddin"])
+    report = await send(client, tokens["sam"])
     await client.post(f"/api/v1/reports/{report['id']}/resolve", json={"status": "done"}, headers=tokens["ali"])
     aged = "update reports set closed_at = now() - interval '30 days', updated_at = now() - interval '30 days'"
     await database.execute(aged)
-    assert (await client.get("/api/v1/inbox", headers=tokens["asliddin"])).json()["threads"] == []
+    assert (await client.get("/api/v1/inbox", headers=tokens["sam"])).json()["threads"] == []
 
     body = {"text": "one more question about this"}
     await client.post(f"/api/v1/reports/{report['id']}/replies", json=body, headers=tokens["ali"])
-    threads = (await client.get("/api/v1/inbox", headers=tokens["asliddin"])).json()["threads"]
+    threads = (await client.get("/api/v1/inbox", headers=tokens["sam"])).json()["threads"]
     assert [thread["id"] for thread in threads] == [report["id"]]
 
 
 async def test_handing_back_needs_a_reason_and_rejected_is_gone(client, tokens):
-    report = await send(client, tokens["asliddin"])
+    report = await send(client, tokens["sam"])
     url = f"/api/v1/reports/{report['id']}/resolve"
     assert (await client.post(url, json={"status": "rejected", "note": "no"}, headers=tokens["ali"])).status_code == 422
     assert (
@@ -223,8 +219,8 @@ async def test_handing_back_needs_a_reason_and_rejected_is_gone(client, tokens):
 
 
 async def test_anyone_can_close_an_open_report_without_a_reason(client, tokens):
-    waiting = await send(client, tokens["asliddin"])
-    held = await send(client, tokens["asliddin"], title="held one")
+    waiting = await send(client, tokens["sam"])
+    held = await send(client, tokens["sam"], title="held one")
     await client.post(f"/api/v1/reports/{held['id']}/take", headers=tokens["ali"])
 
     by_outsider = await client.post(f"/api/v1/reports/{waiting['id']}/close", headers=tokens["dana"])
@@ -246,31 +242,31 @@ async def test_anyone_can_close_an_open_report_without_a_reason(client, tokens):
 
 
 async def test_a_returned_report_can_be_closed_by_its_sender(client, tokens):
-    report = await send(client, tokens["asliddin"])
+    report = await send(client, tokens["sam"])
     body = {"status": "needs-changes", "note": "which fields?"}
     await client.post(f"/api/v1/reports/{report['id']}/resolve", json=body, headers=tokens["ali"])
-    closed = await client.post(f"/api/v1/reports/{report['id']}/close", headers=tokens["asliddin"])
+    closed = await client.post(f"/api/v1/reports/{report['id']}/close", headers=tokens["sam"])
     assert closed.json()["status"] == "closed"
-    assert (await client.get("/api/v1/inbox", headers=tokens["asliddin"])).json()["returned"] == 0
+    assert (await client.get("/api/v1/inbox", headers=tokens["sam"])).json()["returned"] == 0
 
 
 async def test_edit_without_a_real_change_is_refused_or_ignored(client, tokens):
-    report = await send(client, tokens["asliddin"])
+    report = await send(client, tokens["sam"])
     url = f"/api/v1/reports/{report['id']}"
-    assert (await client.patch(url, json={}, headers=tokens["asliddin"])).status_code == 400
-    same = await client.patch(url, json={"text": report["text"]}, headers=tokens["asliddin"])
+    assert (await client.patch(url, json={}, headers=tokens["sam"])).status_code == 400
+    same = await client.patch(url, json={"text": report["text"]}, headers=tokens["sam"])
     assert same.status_code == 200 and same.json()["version"] == 1
-    real = await client.patch(url, json={"priority": "high"}, headers=tokens["asliddin"])
+    real = await client.patch(url, json={"priority": "high"}, headers=tokens["sam"])
     assert real.json()["version"] == 2 and real.json()["priority"] == "high"
 
 
 async def test_sender_can_withdraw_a_report_and_nobody_else_can(client, tokens, database):
-    report = await send(client, tokens["asliddin"], text="SECRET=xyz")
+    report = await send(client, tokens["sam"], text="SECRET=xyz")
     url = f"/api/v1/reports/{report['id']}"
     await client.post(f"{url}/take", headers=tokens["ali"])
     assert (await client.delete(url, headers=tokens["ali"])).status_code == 403
     assert (await client.delete(url, headers=tokens["bobur"])).status_code == 403
-    assert (await client.delete(url, headers=tokens["asliddin"])).status_code == 204
+    assert (await client.delete(url, headers=tokens["sam"])).status_code == 204
     assert (await client.get(url, headers=tokens["ali"])).status_code == 404
     assert (await client.get("/api/v1/board", headers=tokens["ali"])).json() == []
     assert await database("select count(*) from reports") == 0
@@ -278,7 +274,7 @@ async def test_sender_can_withdraw_a_report_and_nobody_else_can(client, tokens, 
 
 async def test_replies_are_capped_per_report(client, tokens, monkeypatch):
     monkeypatch.setattr(settings, "MAX_REPLIES", 2)
-    report = await send(client, tokens["asliddin"])
+    report = await send(client, tokens["sam"])
     url = f"/api/v1/reports/{report['id']}/replies"
     for _ in range(2):
         assert (await client.post(url, json={"text": "ok"}, headers=tokens["ali"])).status_code == 200
@@ -288,22 +284,22 @@ async def test_replies_are_capped_per_report(client, tokens, monkeypatch):
 
 async def test_changes_are_rate_limited_per_user(client, tokens, monkeypatch):
     monkeypatch.setattr(settings, "WRITES_PER_MINUTE", 2)
-    await send(client, tokens["asliddin"])
-    await send(client, tokens["asliddin"])
-    limited = await client.post("/api/v1/reports", json=report_body(), headers=tokens["asliddin"])
+    await send(client, tokens["sam"])
+    await send(client, tokens["sam"])
+    limited = await client.post("/api/v1/reports", json=report_body(), headers=tokens["sam"])
     assert limited.status_code == 429 and limited.json()["code"] == "too_many_requests"
-    assert (await client.get("/api/v1/board", headers=tokens["asliddin"])).status_code == 200
+    assert (await client.get("/api/v1/board", headers=tokens["sam"])).status_code == 200
     await send(client, tokens["bobur"])
 
 
-async def test_readiness_reports_a_stopped_event_listener(client, redis):
+async def test_readiness_reports_a_stopped_event_listener(client):
     response = await client.get("/health/ready")
     assert response.status_code == 503
-    assert response.json() == {"status": "degraded", "database": True, "redis": True, "events": False}
+    assert response.json() == {"status": "degraded", "database": True, "events": False}
 
 
 async def test_readiness_is_ok_while_listening(client, hub):
-    expected = {"status": "ok", "database": True, "redis": True, "events": True}
+    expected = {"status": "ok", "database": True, "events": True}
     assert (await client.get("/health/ready")).json() == expected
 
 
@@ -311,11 +307,11 @@ ITEMS = [{"title": "Stage history panel"}, {"title": "Response time chart"}, {"t
 
 
 async def test_receiver_ticks_checklist_items_and_rows_show_the_progress(client, tokens):
-    report = await send(client, tokens["asliddin"], items=ITEMS)
+    report = await send(client, tokens["sam"], items=ITEMS)
     assert [item["id"] for item in report["items"]] == [1, 2, 3] and not any(item["done"] for item in report["items"])
     url = f"/api/v1/reports/{report['id']}/items/check"
 
-    assert (await client.post(url, json={"item_ids": [1]}, headers=tokens["asliddin"])).status_code == 403
+    assert (await client.post(url, json={"item_ids": [1]}, headers=tokens["sam"])).status_code == 403
     assert (await client.post(url, json={"item_ids": [9]}, headers=tokens["ali"])).status_code == 400
     ticked = await client.post(url, json={"item_ids": [1, 3, 3]}, headers=tokens["ali"])
     assert [item["done"] for item in ticked.json()["items"]] == [True, False, True]
@@ -330,10 +326,10 @@ async def test_receiver_ticks_checklist_items_and_rows_show_the_progress(client,
 
 
 async def test_editing_the_checklist_keeps_marks_of_unchanged_items(client, tokens):
-    report = await send(client, tokens["asliddin"], items=ITEMS)
+    report = await send(client, tokens["sam"], items=ITEMS)
     await client.post(f"/api/v1/reports/{report['id']}/items/check", json={"item_ids": [2]}, headers=tokens["ali"])
     body = {"items": [{"title": "Response time chart"}, {"title": "Brand new item"}]}
-    edited = await client.patch(f"/api/v1/reports/{report['id']}", json=body, headers=tokens["asliddin"])
+    edited = await client.patch(f"/api/v1/reports/{report['id']}", json=body, headers=tokens["sam"])
     assert [(item["id"], item["title"], item["done"]) for item in edited.json()["items"]] == [
         (1, "Response time chart", True),
         (2, "Brand new item", False),
@@ -343,9 +339,9 @@ async def test_editing_the_checklist_keeps_marks_of_unchanged_items(client, toke
 
 async def test_checklist_is_capped_and_closed_reports_cannot_be_ticked(client, tokens, monkeypatch):
     too_many = [{"title": f"item {number}"} for number in range(31)]
-    response = await client.post("/api/v1/reports", json=report_body(items=too_many), headers=tokens["asliddin"])
+    response = await client.post("/api/v1/reports", json=report_body(items=too_many), headers=tokens["sam"])
     assert response.status_code == 422
-    report = await send(client, tokens["asliddin"], items=ITEMS)
+    report = await send(client, tokens["sam"], items=ITEMS)
     await client.post(f"/api/v1/reports/{report['id']}/close", headers=tokens["ali"])
     url = f"/api/v1/reports/{report['id']}/items/check"
     assert (await client.post(url, json={"item_ids": [1]}, headers=tokens["ali"])).status_code == 409
@@ -353,9 +349,9 @@ async def test_checklist_is_capped_and_closed_reports_cannot_be_ticked(client, t
 
 async def test_take_next_skips_reports_that_are_not_ready_but_they_stay_visible(client, tokens):
     blocked = await send(
-        client, tokens["asliddin"], priority="urgent", readiness="after-deploy", readiness_note="after shipment#178"
+        client, tokens["sam"], priority="urgent", readiness="after-deploy", readiness_note="after shipment#178"
     )
-    ready = await send(client, tokens["asliddin"], title="ready one")
+    ready = await send(client, tokens["sam"], title="ready one")
 
     inbox = (await client.get("/api/v1/inbox", headers=tokens["ali"])).json()
     assert [(row["id"], row["readiness"]) for row in inbox["rows"]] == [
@@ -369,19 +365,17 @@ async def test_take_next_skips_reports_that_are_not_ready_but_they_stay_visible(
 
 
 async def test_marking_ready_clears_the_note_unless_a_new_one_is_given(client, tokens):
-    report = await send(client, tokens["asliddin"], readiness="waiting-decision", readiness_note="pricing undecided")
+    report = await send(client, tokens["sam"], readiness="waiting-decision", readiness_note="pricing undecided")
     url = f"/api/v1/reports/{report['id']}"
-    ready = await client.patch(url, json={"readiness": "ready"}, headers=tokens["asliddin"])
+    ready = await client.patch(url, json={"readiness": "ready"}, headers=tokens["sam"])
     assert ready.json()["readiness"] == "ready" and ready.json()["readiness_note"] is None
-    noted = await client.patch(
-        url, json={"readiness": "ready", "readiness_note": "live on dev"}, headers=tokens["asliddin"]
-    )
+    noted = await client.patch(url, json={"readiness": "ready", "readiness_note": "live on dev"}, headers=tokens["sam"])
     assert noted.json()["readiness_note"] == "live on dev" and noted.json()["version"] == 3
 
 
 async def test_hiding_is_personal_and_leaves_the_report_alone(client, tokens):
-    mine = await send(client, tokens["asliddin"], title="for the team")
-    held = await send(client, tokens["asliddin"], title="held by vali")
+    mine = await send(client, tokens["sam"], title="for the team")
+    held = await send(client, tokens["sam"], title="held by vali")
     await client.post(f"/api/v1/reports/{held['id']}/take", headers=tokens["vali"])
 
     assert (await client.post(f"/api/v1/reports/{held['id']}/hide", headers=tokens["ali"])).status_code == 204
@@ -400,9 +394,9 @@ async def test_hiding_is_personal_and_leaves_the_report_alone(client, tokens):
 
 
 async def test_hidden_reports_leave_the_counts_and_come_back_when_taken(client, tokens, database):
-    report = await send(client, tokens["asliddin"], due=(datetime.now(UTC) - timedelta(hours=1)).isoformat())
+    report = await send(client, tokens["sam"], due=(datetime.now(UTC) - timedelta(hours=1)).isoformat())
     await client.post(f"/api/v1/reports/{report['id']}/hide", headers=tokens["ali"])
-    inbox = (await client.get("/api/v1/inbox?project=thecargo-frontend", headers=tokens["ali"])).json()
+    inbox = (await client.get("/api/v1/inbox?project=web-app", headers=tokens["ali"])).json()
     assert (inbox["waiting"], inbox["waiting_for_project"], inbox["overdue"]) == (0, 0, 0)
 
     await client.post(f"/api/v1/reports/{report['id']}/take", headers=tokens["ali"])
@@ -416,8 +410,8 @@ async def test_hidden_reports_leave_the_counts_and_come_back_when_taken(client, 
 
 
 async def test_a_closed_report_reopens_to_the_state_it_had(client, tokens):
-    waiting = await send(client, tokens["asliddin"], title="was waiting")
-    held = await send(client, tokens["asliddin"], title="was held")
+    waiting = await send(client, tokens["sam"], title="was waiting")
+    held = await send(client, tokens["sam"], title="was held")
     await client.post(f"/api/v1/reports/{held['id']}/take", headers=tokens["ali"])
     for report in (waiting, held):
         closed = await client.post(f"/api/v1/reports/{report['id']}/close", headers=tokens["vali"])
@@ -448,79 +442,79 @@ async def test_a_closed_report_reopens_to_the_state_it_had(client, tokens):
 
 
 async def test_the_sender_can_reopen_a_report_marked_done(client, tokens):
-    report = await send(client, tokens["asliddin"])
+    report = await send(client, tokens["sam"])
     await client.post(f"/api/v1/reports/{report['id']}/resolve", json={"status": "done"}, headers=tokens["ali"])
     reopened = await client.post(
-        f"/api/v1/reports/{report['id']}/reopen", json={"note": "the chart is missing"}, headers=tokens["asliddin"]
+        f"/api/v1/reports/{report['id']}/reopen", json={"note": "the chart is missing"}, headers=tokens["sam"]
     )
     assert (reopened.json()["status"], reopened.json()["assignee"]) == ("taken", "ali")
     assert (await client.get("/api/v1/inbox", headers=tokens["ali"])).json()["taken_by_me"] == 1
 
 
 async def test_a_returned_report_that_was_closed_reopens_as_returned(client, tokens):
-    report = await send(client, tokens["asliddin"])
+    report = await send(client, tokens["sam"])
     body = {"status": "needs-changes", "note": "which fields?"}
     await client.post(f"/api/v1/reports/{report['id']}/resolve", json=body, headers=tokens["ali"])
-    await client.post(f"/api/v1/reports/{report['id']}/close", headers=tokens["asliddin"])
-    reopened = await client.post(f"/api/v1/reports/{report['id']}/reopen", headers=tokens["asliddin"])
+    await client.post(f"/api/v1/reports/{report['id']}/close", headers=tokens["sam"])
+    reopened = await client.post(f"/api/v1/reports/{report['id']}/reopen", headers=tokens["sam"])
     assert (reopened.json()["status"], reopened.json()["note"]) == ("needs-changes", None)
-    assert (await client.get("/api/v1/inbox", headers=tokens["asliddin"])).json()["returned"] == 1
+    assert (await client.get("/api/v1/inbox", headers=tokens["sam"])).json()["returned"] == 1
 
 
 async def test_items_carry_their_own_project_and_each_session_sees_its_share(client, tokens):
     items = [
         {"title": "Web button"},
-        {"title": "iOS button", "project": "thecargo-mobile"},
-        {"title": "Pay page route", "project": "thecargo-invoice"},
+        {"title": "iOS button", "project": "mobile-app"},
+        {"title": "Pay page route", "project": "invoice"},
     ]
-    report = await send(client, tokens["asliddin"], items=items)
-    assert [item["project"] for item in report["items"]] == [None, "thecargo-mobile", "thecargo-invoice"]
+    report = await send(client, tokens["sam"], items=items)
+    assert [item["project"] for item in report["items"]] == [None, "mobile-app", "invoice"]
     await client.post(f"/api/v1/reports/{report['id']}/items/check", json={"item_ids": [2]}, headers=tokens["ali"])
 
-    mobile = (await client.get("/api/v1/inbox?project=thecargo-mobile", headers=tokens["ali"])).json()
+    mobile = (await client.get("/api/v1/inbox?project=mobile-app", headers=tokens["ali"])).json()
     assert mobile["waiting_for_project"] == 1
     row = mobile["rows"][0]
-    assert row["projects"] == ["thecargo-frontend", "thecargo-mobile", "thecargo-invoice"]
+    assert row["projects"] == ["web-app", "mobile-app", "invoice"]
     assert (row["items_here_done"], row["items_here_total"], row["items_done"], row["items_total"]) == (1, 1, 1, 3)
 
-    elsewhere = (await client.get("/api/v1/inbox?project=thecargo-crm", headers=tokens["ali"])).json()
+    elsewhere = (await client.get("/api/v1/inbox?project=crm", headers=tokens["ali"])).json()
     assert elsewhere["waiting_for_project"] == 0 and elsewhere["rows"][0]["items_here_total"] == 0
     assert (await client.get("/api/v1/inbox", headers=tokens["ali"])).json()["rows"][0]["items_here_total"] is None
 
-    taken = await client.post("/api/v1/reports/take-next?project=thecargo-invoice", headers=tokens["ali"])
+    taken = await client.post("/api/v1/reports/take-next?project=invoice", headers=tokens["ali"])
     assert taken.json()["id"] == report["id"]
-    board = (await client.get("/api/v1/board?project=thecargo-mobile", headers=tokens["ali"])).json()
+    board = (await client.get("/api/v1/board?project=mobile-app", headers=tokens["ali"])).json()
     assert [row["id"] for row in board] == [report["id"]]
 
 
 async def test_a_workspace_session_counts_every_repository_it_holds_and_aliases_resolve(client, tokens, monkeypatch):
-    aliases = {"mobile": "thecargo-mobile", "thecargo-desktop-electron": "thecargo-desktop"}
+    aliases = {"mobile": "mobile-app", "desktop-electron": "desktop"}
     monkeypatch.setattr(settings, "PROJECT_ALIASES", aliases)
-    await send(client, tokens["asliddin"], title="for the web")
-    await send(client, tokens["asliddin"], title="for mobile", project="mobile")
-    await send(client, tokens["asliddin"], title="for desktop", project="thecargo-desktop-electron")
-    await send(client, tokens["asliddin"], title="for the crm", project="thecargo-crm")
+    await send(client, tokens["sam"], title="for the web")
+    await send(client, tokens["sam"], title="for mobile", project="mobile")
+    await send(client, tokens["sam"], title="for desktop", project="desktop-electron")
+    await send(client, tokens["sam"], title="for the crm", project="crm")
 
-    url = "/api/v1/inbox?project=thecargo-frontend&project=mobile&project=thecargo-desktop-electron"
+    url = "/api/v1/inbox?project=web-app&project=mobile&project=desktop-electron"
     inbox = (await client.get(url, headers=tokens["ali"])).json()
-    assert inbox["projects"] == ["thecargo-frontend", "thecargo-mobile", "thecargo-desktop"]
+    assert inbox["projects"] == ["web-app", "mobile-app", "desktop"]
     assert (inbox["waiting"], inbox["waiting_for_project"]) == (4, 3)
     assert sorted(row["project"] for row in inbox["rows"]) == [
-        "thecargo-crm",
-        "thecargo-desktop",
-        "thecargo-frontend",
-        "thecargo-mobile",
+        "crm",
+        "desktop",
+        "mobile-app",
+        "web-app",
     ]
 
 
 async def test_unread_replies_follow_the_people_involved_until_they_read_them(client, tokens):
-    report = await send(client, tokens["asliddin"])
+    report = await send(client, tokens["sam"])
     rid = report["id"]
     await client.post(f"/api/v1/reports/{rid}/take", headers=tokens["ali"])
     await client.post(f"/api/v1/reports/{rid}/replies", json={"text": "Android SHA-1s:\nE9:53…"}, headers=tokens["ali"])
     await client.post(f"/api/v1/reports/{rid}/replies", json={"text": "and the bundle id"}, headers=tokens["ali"])
 
-    sender = (await client.get("/api/v1/inbox", headers=tokens["asliddin"])).json()
+    sender = (await client.get("/api/v1/inbox", headers=tokens["sam"])).json()
     assert sender["unread_replies"] == 2 and sender["rows"] == []
     thread = sender["threads"][0]
     assert (thread["id"], thread["unread"], thread["last_reply_by"]) == (rid, 2, "ali")
@@ -529,38 +523,38 @@ async def test_unread_replies_follow_the_people_involved_until_they_read_them(cl
     assert (await client.get("/api/v1/inbox", headers=tokens["ali"])).json()["unread_replies"] == 0
     assert (await client.get("/api/v1/inbox", headers=tokens["bobur"])).json()["threads"] == []
 
-    await client.get(f"/api/v1/reports/{rid}", headers=tokens["asliddin"])
-    assert (await client.get("/api/v1/inbox", headers=tokens["asliddin"])).json()["unread_replies"] == 2
-    await client.get(f"/api/v1/reports/{rid}?mark_seen=true", headers=tokens["asliddin"])
-    assert (await client.get("/api/v1/inbox", headers=tokens["asliddin"])).json()["unread_replies"] == 0
+    await client.get(f"/api/v1/reports/{rid}", headers=tokens["sam"])
+    assert (await client.get("/api/v1/inbox", headers=tokens["sam"])).json()["unread_replies"] == 2
+    await client.get(f"/api/v1/reports/{rid}?mark_seen=true", headers=tokens["sam"])
+    assert (await client.get("/api/v1/inbox", headers=tokens["sam"])).json()["unread_replies"] == 0
 
     body = {"text": "added to the console"}
-    await client.post(f"/api/v1/reports/{rid}/replies", json=body, headers=tokens["asliddin"])
+    await client.post(f"/api/v1/reports/{rid}/replies", json=body, headers=tokens["sam"])
     holder = (await client.get("/api/v1/inbox", headers=tokens["ali"])).json()
-    assert holder["unread_replies"] == 1 and holder["threads"][0]["last_reply_by"] == "asliddin"
-    assert (await client.get("/api/v1/inbox", headers=tokens["asliddin"])).json()["unread_replies"] == 0
+    assert holder["unread_replies"] == 1 and holder["threads"][0]["last_reply_by"] == "sam"
+    assert (await client.get("/api/v1/inbox", headers=tokens["sam"])).json()["unread_replies"] == 0
 
 
 async def test_unread_replies_stay_visible_on_a_closed_report_and_vanish_with_it(client, tokens, database):
-    report = await send(client, tokens["asliddin"])
+    report = await send(client, tokens["sam"])
     rid = report["id"]
     await client.post(f"/api/v1/reports/{rid}/replies", json={"text": "done, see PR"}, headers=tokens["ali"])
     await client.post(f"/api/v1/reports/{rid}/resolve", json={"status": "done"}, headers=tokens["ali"])
-    assert (await client.get("/api/v1/inbox", headers=tokens["asliddin"])).json()["threads"][0]["status"] == "done"
+    assert (await client.get("/api/v1/inbox", headers=tokens["sam"])).json()["threads"][0]["status"] == "done"
 
-    await client.get(f"/api/v1/reports/{rid}?mark_seen=true", headers=tokens["asliddin"])
-    assert await database("select count(*) from reply_reads where user_name = 'asliddin'") == 1
+    await client.get(f"/api/v1/reports/{rid}?mark_seen=true", headers=tokens["sam"])
+    assert await database("select count(*) from reply_reads where user_name = 'sam'") == 1
     await client.post(f"/api/v1/reports/{rid}/replies", json={"text": "merged now"}, headers=tokens["ali"])
-    assert (await client.get("/api/v1/inbox", headers=tokens["asliddin"])).json()["unread_replies"] == 1
+    assert (await client.get("/api/v1/inbox", headers=tokens["sam"])).json()["unread_replies"] == 1
 
-    await client.delete(f"/api/v1/reports/{rid}", headers=tokens["asliddin"])
-    assert (await client.get("/api/v1/inbox", headers=tokens["asliddin"])).json()["threads"] == []
+    await client.delete(f"/api/v1/reports/{rid}", headers=tokens["sam"])
+    assert (await client.get("/api/v1/inbox", headers=tokens["sam"])).json()["threads"] == []
     assert await database("select count(*) from reply_reads") == 0
     assert await database("select count(*) from replies") == 0
 
 
 async def test_a_report_is_unread_until_i_open_it_and_again_after_the_sender_edits_it(client, tokens):
-    rid = (await send(client, tokens["asliddin"]))["id"]
+    rid = (await send(client, tokens["sam"]))["id"]
 
     async def inbox(name: str) -> dict:
         return (await client.get("/api/v1/inbox", headers=tokens[name])).json()
@@ -575,13 +569,13 @@ async def test_a_report_is_unread_until_i_open_it_and_again_after_the_sender_edi
     assert box["unread"] == 0 and box["rows"][0]["read"] is True
     assert (await inbox("vali"))["rows"][0]["read"] is False
 
-    await client.patch(f"/api/v1/reports/{rid}", json={"text": "now with page sizes"}, headers=tokens["asliddin"])
+    await client.patch(f"/api/v1/reports/{rid}", json={"text": "now with page sizes"}, headers=tokens["sam"])
     box = await inbox("ali")
     assert box["unread"] == 1 and box["rows"][0]["read"] is False
 
 
 async def test_taking_a_report_reads_it_and_the_sender_never_has_to(client, tokens):
-    rid = (await send(client, tokens["asliddin"]))["id"]
+    rid = (await send(client, tokens["sam"]))["id"]
     await client.post(f"/api/v1/reports/{rid}/take", headers=tokens["ali"])
 
     holder = (await client.get("/api/v1/inbox", headers=tokens["ali"])).json()
@@ -591,7 +585,7 @@ async def test_taking_a_report_reads_it_and_the_sender_never_has_to(client, toke
 
     body = {"status": "needs-changes", "note": "which page size?"}
     await client.post(f"/api/v1/reports/{rid}/resolve", json=body, headers=tokens["ali"])
-    sender = (await client.get("/api/v1/inbox", headers=tokens["asliddin"])).json()
+    sender = (await client.get("/api/v1/inbox", headers=tokens["sam"])).json()
     assert sender["returned_rows"][0]["read"] is True
 
     board = (await client.get("/api/v1/board", headers=tokens["ali"])).json()
@@ -599,9 +593,9 @@ async def test_taking_a_report_reads_it_and_the_sender_never_has_to(client, toke
 
 
 async def test_a_report_i_hold_can_be_put_in_one_of_my_sessions(client, tokens, hub):
-    rid = (await send(client, tokens["asliddin"]))["id"]
+    rid = (await send(client, tokens["sam"]))["id"]
     url = f"/api/v1/reports/{rid}/session"
-    body = {"session": "s-web-1", "label": "thecargo-frontend"}
+    body = {"session": "s-web-1", "label": "web-app"}
 
     async def row(name: str) -> dict:
         return (await client.get("/api/v1/inbox", headers=tokens[name])).json()["rows"][0]
@@ -613,15 +607,15 @@ async def test_a_report_i_hold_can_be_put_in_one_of_my_sessions(client, tokens, 
     assert (await client.put(url, json=body, headers=tokens["vali"])).status_code == 409
 
     assert (await client.put(url, json=body, headers=tokens["ali"])).status_code == 204
-    assert (await row("ali"))["session"] == {"id": "s-web-1", "label": "thecargo-frontend", "live": False}
+    assert (await row("ali"))["session"] == {"id": "s-web-1", "label": "web-app", "live": False}
     assert (await row("vali"))["session"] is None
 
     hub.subscribe(User(name="ali", team="frontend"), "s-web-1")
     assert (await row("ali"))["session"]["live"] is True
 
-    moved = {"session": "s-web-2", "label": "thecargo-frontend"}
+    moved = {"session": "s-web-2", "label": "web-app"}
     await client.put(url, json=moved, headers=tokens["ali"])
-    assert (await row("ali"))["session"] == {"id": "s-web-2", "label": "thecargo-frontend", "live": False}
+    assert (await row("ali"))["session"] == {"id": "s-web-2", "label": "web-app", "live": False}
 
     assert (await client.delete(url, headers=tokens["ali"])).status_code == 204
     held = await row("ali")
@@ -629,86 +623,86 @@ async def test_a_report_i_hold_can_be_put_in_one_of_my_sessions(client, tokens, 
 
 
 async def test_a_thread_says_when_its_last_reply_came(client, tokens):
-    rid = (await send(client, tokens["asliddin"]))["id"]
+    rid = (await send(client, tokens["sam"]))["id"]
     report = (
         await client.post(f"/api/v1/reports/{rid}/replies", json={"text": "which env?"}, headers=tokens["ali"])
     ).json()
 
-    thread = (await client.get("/api/v1/inbox", headers=tokens["asliddin"])).json()["threads"][0]
+    thread = (await client.get("/api/v1/inbox", headers=tokens["sam"])).json()["threads"][0]
     assert thread["last_reply_at"] == report["replies"][-1]["created_at"]
 
 
 async def test_done_is_refused_while_items_are_unticked_unless_told_otherwise(client, tokens):
-    report = await send(client, tokens["asliddin"], items=ITEMS)
+    report = await send(client, tokens["sam"], items=ITEMS)
     url = f"/api/v1/reports/{report['id']}"
     refused = await client.post(f"{url}/resolve", json={"status": "done"}, headers=tokens["ali"])
     assert refused.status_code == 409 and "3 unticked checklist item(s): 1, 2, 3" in refused.json()["detail"]
     body = {"status": "needs-changes", "note": "unclear"}
     assert (await client.post(f"{url}/resolve", json=body, headers=tokens["ali"])).status_code == 200
 
-    other = await send(client, tokens["asliddin"], items=ITEMS)
+    other = await send(client, tokens["sam"], items=ITEMS)
     url = f"/api/v1/reports/{other['id']}"
     await client.post(f"{url}/items/check", json={"item_ids": [1, 2, 3]}, headers=tokens["ali"])
     assert (await client.post(f"{url}/resolve", json={"status": "done"}, headers=tokens["ali"])).status_code == 200
 
-    third = await send(client, tokens["asliddin"], items=ITEMS)
+    third = await send(client, tokens["sam"], items=ITEMS)
     body = {"status": "done", "allow_open_items": True}
     forced = await client.post(f"/api/v1/reports/{third['id']}/resolve", json=body, headers=tokens["ali"])
     assert forced.status_code == 200 and forced.json()["status"] == "done"
 
 
 async def test_done_says_where_the_work_is_and_it_can_be_updated(client, tokens):
-    report = await send(client, tokens["asliddin"])
+    report = await send(client, tokens["sam"])
     url = f"/api/v1/reports/{report['id']}"
     body = {"status": "done", "note": "built", "delivery": "local", "refs": ["branch feat/apple-sign-in"]}
     done = await client.post(f"{url}/resolve", json=body, headers=tokens["ali"])
     assert (done.json()["delivery"], done.json()["delivery_refs"]) == ("local", ["branch feat/apple-sign-in"])
-    assert (await client.get("/api/v1/board", headers=tokens["asliddin"])).json()[0]["delivery"] == "local"
+    assert (await client.get("/api/v1/board", headers=tokens["sam"])).json()[0]["delivery"] == "local"
 
-    by_sender = await client.post(f"{url}/delivery", json={"delivery": "merged"}, headers=tokens["asliddin"])
+    by_sender = await client.post(f"{url}/delivery", json={"delivery": "merged"}, headers=tokens["sam"])
     assert by_sender.status_code == 403
     body = {"delivery": "merged", "refs": ["PR #88"]}
     merged = (await client.post(f"{url}/delivery", json=body, headers=tokens["vali"])).json()
     assert (merged["delivery"], merged["delivery_refs"], merged["status"]) == ("merged", ["PR #88"], "done")
 
-    reopened = await client.post(f"{url}/reopen", headers=tokens["asliddin"])
+    reopened = await client.post(f"{url}/reopen", headers=tokens["sam"])
     assert (reopened.json()["delivery"], reopened.json()["delivery_refs"]) == (None, [])
-    waiting = await send(client, tokens["asliddin"])
+    waiting = await send(client, tokens["sam"])
     url = f"/api/v1/reports/{waiting['id']}/delivery"
     assert (await client.post(url, json={"delivery": "pr"}, headers=tokens["ali"])).status_code == 409
 
 
 async def test_reports_can_point_at_related_reports(client, tokens):
-    first = await send(client, tokens["asliddin"], title="Phone billing: contract")
-    second = await send(client, tokens["asliddin"], title="Phone billing: pages", related=[first["id"], first["id"]])
+    first = await send(client, tokens["sam"], title="Phone billing: contract")
+    second = await send(client, tokens["sam"], title="Phone billing: pages", related=[first["id"], first["id"]])
     assert second["related"] == [first["id"]]
     url = f"/api/v1/reports/{second['id']}"
-    edited = await client.patch(url, json={"related": [second["id"], 77]}, headers=tokens["asliddin"])
+    edited = await client.patch(url, json={"related": [second["id"], 77]}, headers=tokens["sam"])
     assert edited.json()["related"] == [77]
     assert (await client.get("/api/v1/inbox", headers=tokens["ali"])).json()["rows"][1]["related"] == [77]
 
 
 async def test_a_long_report_and_a_long_reply_fit(client, tokens):
-    report = await send(client, tokens["asliddin"], text="x" * 45000)
+    report = await send(client, tokens["sam"], text="x" * 45000)
     url = f"/api/v1/reports/{report['id']}/replies"
     assert (await client.post(url, json={"text": "y" * 15000}, headers=tokens["ali"])).status_code == 200
-    too_long = await client.post("/api/v1/reports", json=report_body(text="x" * 60001), headers=tokens["asliddin"])
+    too_long = await client.post("/api/v1/reports", json=report_body(text="x" * 60001), headers=tokens["sam"])
     assert too_long.status_code == 422
 
 
 async def test_every_change_is_kept_in_the_history(client, tokens, database):
-    report = await send(client, tokens["asliddin"])
+    report = await send(client, tokens["sam"])
     await client.post(f"/api/v1/reports/{report['id']}/take", headers=tokens["ali"])
     await client.post(f"/api/v1/reports/{report['id']}/resolve", json={"status": "done"}, headers=tokens["ali"])
-    await client.delete(f"/api/v1/reports/{report['id']}", headers=tokens["asliddin"])
+    await client.delete(f"/api/v1/reports/{report['id']}", headers=tokens["sam"])
     history = await database("select string_agg(type || ':' || by_user, ', ' order by id) from events")
-    assert history == "new:asliddin, taken:ali, done:ali, withdrawn:asliddin"
+    assert history == "new:sam, taken:ali, done:ali, withdrawn:sam"
 
 
 async def test_ids_keep_counting_and_a_token_is_stored_only_as_a_hash(client, tokens, database):
-    first = await send(client, tokens["asliddin"])
-    await client.delete(f"/api/v1/reports/{first['id']}", headers=tokens["asliddin"])
-    second = await send(client, tokens["asliddin"])
+    first = await send(client, tokens["sam"])
+    await client.delete(f"/api/v1/reports/{first['id']}", headers=tokens["sam"])
+    second = await send(client, tokens["sam"])
     assert second["id"] == first["id"] + 1
     token = tokens["ali"]["Authorization"].removeprefix("Bearer ")
     assert await database("select count(*) from users where token_hash = :token", token=token) == 0

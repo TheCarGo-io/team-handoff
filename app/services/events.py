@@ -4,17 +4,20 @@ import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 
-from redis.asyncio import Redis
+import asyncpg
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import settings
-from app.core.redis import key
 from app.schemas.report import Event
 from app.schemas.user import User
 
 logger = logging.getLogger(__name__)
 
 RESYNC = {"type": "resync", "notify": False}
-LISTEN_TIMEOUT_SECONDS = 15.0
+CHANNEL = "handoff_events"
+LISTEN_CHECK_SECONDS = 15.0
+NOTIFY = text("select pg_notify(:channel, :payload)")
 
 
 class Subscriber:
@@ -35,16 +38,21 @@ class Subscriber:
 
 
 class EventHub:
-    def __init__(self, redis: Redis):
-        self.redis = redis
+    def __init__(self, database: async_sessionmaker[AsyncSession], dsn: str):
+        self.database = database
+        self.dsn = dsn
         self.subscribers: list[Subscriber] = []
         self.left: dict[tuple[str, str], float] = {}
         self.closing = False
         self.listening = False
 
+    async def notify(self, payload: str) -> None:
+        async with self.database() as session, session.begin():
+            await session.execute(NOTIFY, {"channel": CHANNEL, "payload": payload})
+
     async def publish(self, event: Event) -> None:
         try:
-            await self.redis.publish(key("events"), event.model_dump_json())
+            await self.notify(event.model_dump_json())
         except Exception:
             logger.exception("event %s for report #%s was not published", event.type.value, event.id)
 
@@ -53,6 +61,11 @@ class EventHub:
         self.left = {who: at for who, at in self.left.items() if at >= cutoff}
         streaming = {s.session for s in self.subscribers if s.user.name == user and s.session}
         return streaming | {session for name, session in self.left if name == user}
+
+    def expect(self, user: str, session: str) -> None:
+        if session not in self.sessions(user):
+            self.resync(user)
+        self.left[(user, session)] = time.monotonic()
 
     def subscribe(self, user: User, session: str | None = None) -> Subscriber:
         own = [subscriber for subscriber in self.subscribers if subscriber.user.name == user.name]
@@ -103,9 +116,9 @@ class EventHub:
             if user is None or subscriber.user.name == user:
                 self.push(subscriber, RESYNC)
 
-    async def refresh_user(self, user: str) -> None:
+    async def refresh_user(self, user: str | None) -> None:
         try:
-            await self.redis.publish(key("events"), json.dumps({"refresh_user": user}))
+            await self.notify(json.dumps({"refresh_user": user}))
         except Exception:
             logger.exception("refresh for %s was not published", user)
 
@@ -116,6 +129,12 @@ class EventHub:
         else:
             self.deliver(Event.model_validate(message))
 
+    def heard(self, connection: object, pid: int, channel: str, payload: str) -> None:
+        try:
+            self.receive(payload)
+        except Exception:
+            logger.exception("an event could not be delivered")
+
     def close(self) -> None:
         self.closing = True
         for subscriber in list(self.subscribers):
@@ -123,19 +142,15 @@ class EventHub:
 
     async def run(self) -> None:
         while not self.closing:
+            connection = None
             try:
-                async with self.redis.pubsub() as pubsub:
-                    await pubsub.subscribe(key("events"))
-                    self.listening = True
-                    self.resync()
-                    while not self.closing:
-                        message = await pubsub.get_message(
-                            ignore_subscribe_messages=True, timeout=LISTEN_TIMEOUT_SECONDS
-                        )
-                        if message is None:
-                            await pubsub.ping()
-                        elif message["type"] == "message":
-                            self.receive(message["data"])
+                connection = await asyncpg.connect(self.dsn, timeout=10)
+                await connection.add_listener(CHANNEL, self.heard)
+                self.listening = True
+                self.resync()
+                while not self.closing:
+                    await asyncio.sleep(LISTEN_CHECK_SECONDS)
+                    await connection.execute("select 1", timeout=10)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -143,6 +158,8 @@ class EventHub:
                 await asyncio.sleep(2)
             finally:
                 self.listening = False
+                if connection is not None:
+                    connection.terminate()
 
 
 async def stream(

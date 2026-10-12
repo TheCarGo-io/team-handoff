@@ -2,7 +2,6 @@ from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from typing import NamedTuple
 
-from redis.asyncio import Redis
 from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -10,7 +9,6 @@ from sqlalchemy.orm import defer
 
 from app.core.config import settings
 from app.core.errors import NotFound
-from app.core.redis import key
 from app.models import EventRecord, HiddenReport, ItemRecord, ReplyRead, ReplyRecord, ReportRecord
 from app.schemas.report import OPEN_STATUSES, Event, Item, Reply, Report
 
@@ -101,17 +99,8 @@ def reply_values(report_id: int, reply: Reply) -> dict:
 
 
 class ReportRepository:
-    def __init__(self, sessions: async_sessionmaker[AsyncSession], redis: Redis):
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]):
         self.sessions = sessions
-        self.redis = redis
-
-    async def count_write(self, user: str) -> int:
-        name = key("writes", user, datetime.now(UTC).strftime("%Y%m%d%H%M"))
-        async with self.redis.pipeline(transaction=True) as pipe:
-            pipe.incr(name)
-            pipe.expire(name, 120)
-            count, _ = await pipe.execute()
-        return count
 
     async def hidden(self, user: str) -> set[int]:
         async with self.sessions() as session:

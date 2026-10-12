@@ -19,5 +19,5 @@ format:
 test:
 	. venv/bin/activate && pytest tests/ -v
 
-user:
+cli:
 	. venv/bin/activate && python -m app.cli $(ARGS)

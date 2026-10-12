@@ -22,7 +22,7 @@ from app.schemas.user import User
 
 router = APIRouter(prefix="/api/v1", tags=["reports"], responses=UNAUTHORIZED)
 
-Project = Annotated[str | None, Query(description="Repository name, e.g. thecargo-frontend")]
+Project = Annotated[str | None, Query(description="Repository name, e.g. web-app")]
 Projects = Annotated[
     list[str],
     Query(alias="project", description="Repository names of this session; repeat the parameter for a workspace"),

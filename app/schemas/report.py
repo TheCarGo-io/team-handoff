@@ -95,7 +95,7 @@ class Item(BaseModel):
 
 class ItemInput(BaseModel):
     title: Line = Field(min_length=3, max_length=200, examples=["Lead panel: stage history"])
-    project: Project | None = Field(default=None, examples=["thecargo-mobile"])
+    project: Project | None = Field(default=None, examples=["mobile-app"])
     readiness: Readiness = Readiness.ready
 
 
@@ -109,16 +109,16 @@ class Reply(BaseModel):
 
 class WorkSession(BaseModel):
     id: str = Field(examples=["0b9c2f6e-6a51-4d0f-9f0f-3b1c2a7d5e11"])
-    label: str = Field(examples=["thecargo-frontend"])
+    label: str = Field(examples=["web-app"])
     live: bool = Field(description="Whether that session has its event stream open now")
 
 
 class ReportBase(BaseModel):
     id: int = Field(examples=[12])
     title: str = Field(examples=["GET /loads is now paginated"])
-    project: str = Field(examples=["thecargo-frontend"])
+    project: str = Field(examples=["web-app"])
     from_team: str = Field(examples=["backend"])
-    from_user: str = Field(examples=["asliddin"])
+    from_user: str = Field(examples=["sam"])
     to_team: str = Field(examples=["frontend"])
     to_user: str | None = None
     priority: Priority = Priority.normal
@@ -209,7 +209,7 @@ class SendRequest(BaseModel):
     to_user: str | None = Field(default=None, examples=[None])
     title: Line = Field(min_length=3, max_length=120, examples=["GET /loads is now paginated"])
     text: Body = Field(min_length=1, max_length=settings.MAX_TEXT_LENGTH)
-    project: Project = Field(examples=["thecargo-frontend"])
+    project: Project = Field(examples=["web-app"])
     priority: Priority = Priority.normal
     due: AwareDatetime | None = Field(
         default=None, description="Deadline with a UTC offset, e.g. 2026-10-09T18:00:00+05:00"
@@ -260,7 +260,7 @@ class DeliveryRequest(BaseModel):
 
 class SessionRequest(BaseModel):
     session: str = Field(pattern=SESSION_ID, description="The Claude Code session's id")
-    label: Line = Field(min_length=1, max_length=80, examples=["thecargo-frontend"])
+    label: Line = Field(min_length=1, max_length=80, examples=["web-app"])
 
 
 class CloseRequest(BaseModel):
@@ -305,6 +305,11 @@ class Event(BaseModel):
     note: str = ""
     teams: list[str]
     notify_users: list[str] | None = None
+
+
+class HookInput(BaseModel):
+    session_id: str | None = Field(default=None, max_length=200)
+    source: str | None = Field(default=None, max_length=40)
 
 
 class ErrorResponse(BaseModel):

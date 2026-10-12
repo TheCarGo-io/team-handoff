@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import UTC, datetime
 
@@ -14,6 +15,7 @@ from app.schemas.report import (
     EditRequest,
     Event,
     EventType,
+    HookInput,
     InboxResponse,
     Item,
     ItemInput,
@@ -33,8 +35,10 @@ from app.schemas.report import (
 )
 from app.schemas.user import User
 from app.services.events import EventHub
+from app.services.limits import WriteCounter
 
 logger = logging.getLogger("handoff.audit")
+HOOK_WAIT_SECONDS = 2.0
 
 
 def now() -> datetime:
@@ -84,13 +88,14 @@ def is_read(report: Report, user: User, seen: dict[int, Mark]) -> bool:
 
 
 class ReportService:
-    def __init__(self, reports: ReportRepository, users: UserRepository, hub: EventHub):
+    def __init__(self, reports: ReportRepository, users: UserRepository, hub: EventHub, writes: WriteCounter):
         self.reports = reports
         self.users = users
         self.hub = hub
+        self.writes = writes
 
     async def guard(self, actor: User) -> None:
-        if await self.reports.count_write(actor.name) > settings.WRITES_PER_MINUTE:
+        if not self.writes.allow(actor.name, settings.WRITES_PER_MINUTE):
             raise TooManyRequests(f"More than {settings.WRITES_PER_MINUTE} changes in a minute; slow down")
 
     async def emit(
@@ -124,8 +129,9 @@ class ReportService:
 
     async def send(self, actor: User, body: SendRequest) -> Report:
         await self.guard(actor)
-        if body.to_team not in settings.TEAMS:
-            raise HandoffError(f"Unknown team '{body.to_team}'. Teams: {', '.join(settings.TEAMS)}")
+        teams = await self.users.teams()
+        if body.to_team not in teams:
+            raise HandoffError(f"Unknown team '{body.to_team}'. Teams: {', '.join(teams)}")
         project = canonical(body.project)
         named = [project, *(canonical(item.project) for item in body.items if item.project)]
         unknown = sorted({name for name in named if settings.PROJECTS and name not in settings.PROJECTS})
@@ -235,6 +241,33 @@ class ReportService:
             unread_replies=sum(row.unread for _, row in threads),
             threads=[row for _, row in threads],
         )
+
+    async def announce(self, actor: User, hook: HookInput) -> dict:
+        if hook.source not in (None, "startup", "resume"):
+            return {}
+        waited = 0.0
+        while hook.session_id and waited <= HOOK_WAIT_SECONDS:
+            if hook.session_id in self.hub.sessions(actor.name):
+                return {}
+            await asyncio.sleep(0.25)
+            waited += 0.25
+        box = await self.inbox(actor)
+        counts = [
+            (box.waiting, "waiting for your team"),
+            (box.unread, "not read yet"),
+            (box.taken_by_me, "in progress with you"),
+            (box.returned, "returned to you"),
+            (box.unread_replies, "unread " + ("reply" if box.unread_replies == 1 else "replies")),
+        ]
+        parts = [f"{count} {label}" for count, label in counts if count > 0]
+        if not parts:
+            return {}
+        line = f"Team handoff: {' · '.join(parts)}. /handoff:inbox lists them."
+        context = f"{line} Mention it to the user only if it bears on what they ask."
+        return {
+            "systemMessage": line,
+            "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": context},
+        }
 
     async def hide(self, actor: User, report_id: int, hidden: bool) -> None:
         await self.reports.get(report_id)

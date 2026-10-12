@@ -6,7 +6,8 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.core.errors import HandoffError, Unauthorized
 from app.schemas.user import User
-from app.services.container import get_report_service, get_users
+from app.services.container import get_member_service, get_report_service, get_users
+from app.services.members import MemberService
 from app.services.report import ReportService
 
 USER_KEY = "handoff_user"
@@ -57,3 +58,4 @@ class BearerGate:
 Authorization = Annotated[str | None, Header(include_in_schema=False)]
 CurrentUser = Annotated[User, Depends(current_user)]
 Reports = Annotated[ReportService, Depends(get_report_service)]
+Members = Annotated[MemberService, Depends(get_member_service)]

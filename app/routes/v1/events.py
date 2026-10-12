@@ -1,7 +1,7 @@
 from functools import partial
 from typing import Annotated
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Path, Query
 from fastapi.responses import StreamingResponse
 
 from app.dependencies.auth import Authorization, CurrentUser, is_authorized
@@ -17,6 +17,13 @@ Session = Annotated[
     str | None,
     Query(pattern=SESSION_ID, description="The Claude Code session's id: marks that session as open while it listens"),
 ]
+
+
+@router.put("/sessions/{session}", status_code=204)
+async def expect(user: CurrentUser, session: Annotated[str, Path(pattern=SESSION_ID)]) -> None:
+    """Say that this Claude Code session is starting and will listen to `/events` in a moment, so it counts
+    as open already and the session-start fallback stays quiet for it."""
+    get_hub().expect(user.name, session)
 
 
 @router.get(
