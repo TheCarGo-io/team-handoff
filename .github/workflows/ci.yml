@@ -1,17 +1,18 @@
-name: Build & Deploy
+name: CI
 
 on:
   push:
-    branches: [development, production]
+    branches: [development, main]
+    tags: ["v*"]
+  pull_request:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref_name != 'production' }}
+  cancel-in-progress: true
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ghcr.io/thecargo-io/thecargo-handoff
-  SERVICE_NAME: thecargo_handoff
+  IMAGE_NAME: ghcr.io/thecargo-io/team-handoff
 
 jobs:
   lint:
@@ -30,7 +31,7 @@ jobs:
     timeout-minutes: 15
     env:
       PYTHONPATH: .
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/thecargo_handoff_ci
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/team_handoff_ci
       DB_USE_NULLPOOL: "true"
     services:
       postgres:
@@ -38,7 +39,7 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: thecargo_handoff_ci
+          POSTGRES_DB: team_handoff_ci
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres"
@@ -61,13 +62,12 @@ jobs:
 
   build:
     needs: [lint, test]
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
       packages: write
-    outputs:
-      tag: ${{ steps.vars.outputs.tag }}
     steps:
       - uses: actions/checkout@v4.2.2
 
@@ -82,7 +82,12 @@ jobs:
 
       - name: Resolve image tag
         id: vars
-        run: echo "tag=${{ github.ref_name == 'production' && 'prod' || 'dev' }}" >> "$GITHUB_OUTPUT"
+        run: |
+          case "${{ github.ref }}" in
+            refs/tags/v*) echo "tag=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT" ;;
+            refs/heads/main) echo "tag=latest" >> "$GITHUB_OUTPUT" ;;
+            *) echo "tag=dev" >> "$GITHUB_OUTPUT" ;;
+          esac
 
       - name: Build image
         uses: docker/build-push-action@v6
@@ -110,22 +115,3 @@ jobs:
         run: |
           docker push ${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.tag }}
           docker push ${{ env.IMAGE_NAME }}:${{ github.sha }}
-
-  deploy:
-    needs: build
-    if: ${{ vars.DEPLOY_ENABLED == 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ github.ref_name == 'production' && secrets.PROD_SSH_HOST || secrets.DEPLOY_HOST }}
-          username: ubuntu
-          key: ${{ github.ref_name == 'production' && secrets.PROD_SSH_KEY || secrets.DEPLOY_SSH_KEY }}
-          script: |
-            set -e
-            docker pull ${{ env.IMAGE_NAME }}:${{ github.sha }}
-            docker tag ${{ env.IMAGE_NAME }}:${{ github.sha }} ${{ env.IMAGE_NAME }}:${{ needs.build.outputs.tag }}
-            cd /var/devops/thecargo-handoff
-            make TAG=${{ needs.build.outputs.tag }} HANDOFF_IMAGE=${{ env.IMAGE_NAME }} services-up

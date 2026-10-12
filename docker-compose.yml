@@ -1,0 +1,35 @@
+services:
+  server:
+    image: ghcr.io/thecargo-io/team-handoff:latest
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8080}:8000"
+    environment:
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8080}
+      DB_HOST: db:5432
+      DB_NAME: handoff
+      DB_USER: handoff
+      DB_PASSWORD: ${DB_PASSWORD:-handoff}
+      TEAMS: ${TEAMS:-backend,frontend,mobile,design}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: handoff
+      POSTGRES_USER: handoff
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-handoff}
+    volumes:
+      - handoff-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U handoff -d handoff"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  handoff-db:
