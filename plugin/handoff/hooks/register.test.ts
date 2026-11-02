@@ -716,6 +716,75 @@ test('a report I hold lives in the session it was put in, my other sessions tuck
   expect(describeContext(state as never)).toContain('in their other open sessions (leave these to those sessions unless the user names one): #22')
 })
 
+test('/clear ends the old session stream and connects the new session at once', { options: OPTIONS }, async ($, on) => {
+  const clock = mock.clock(on)
+  const spawned: string[] = []
+  const closed: string[] = []
+  const loads: string[] = []
+  let current = 'sess-A'
+
+  on('session.start', ($$, e) => ({ cwd: e.cwd }))
+  on('session.end', ($$, e) => ({ sessionId: e.sessionId }))
+  on('classic.SessionStart', () => ({}) as never)
+  on('session.id', () => ({ value: current }))
+  on('command.register', ($$, e) => ({ value: { command: e.name } }))
+  on('process.run', () => ({
+    value: {
+      exitCode: 0,
+      stdout: 'git@github.com:TheCarGo-io/thecargo-frontend.git\n',
+      stderr: '',
+      isStdoutTruncated: false,
+      isStderrTruncated: false,
+    },
+  }))
+  on('http.fetch', ($$, e) => {
+    loads.push(current)
+
+    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(INBOX) } }
+  })
+  on('process.spawn', async function* ($$, e) {
+    const session = /\?session=([\w-]+)/.exec(String(e.input))?.[1] ?? ''
+    spawned.push(session)
+
+    try {
+      yield { stream: 'stdout' as const, text: ': connected\n\n' }
+
+      for (;;) {
+        await clock.sleep(5000)
+        yield { stream: 'stdout' as const, text: ': ping\n\n' }
+      }
+    } finally {
+      closed.push(session)
+    }
+  })
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+
+  await $.session.start(START)
+  await clock.advance(10)
+
+  expect(spawned).toEqual(['sess-A'])
+
+  await $.session.end({ reason: 'clear', sessionId: 'sess-A', resume: { id: 'sess-A' } })
+  await clock.advance(5000)
+
+  expect(closed).toEqual(['sess-A'])
+
+  current = 'sess-B'
+  const loaded = loads.length
+  await $.classic.SessionStart({ source: 'clear', session_id: 'sess-B' })
+  await clock.advance(10)
+
+  expect(spawned).toEqual(['sess-A', 'sess-B'])
+  expect(loads.length).toBeGreaterThan(loaded)
+
+  await $.classic.SessionStart({ source: 'compact', session_id: 'sess-B' })
+  await clock.advance(60000)
+
+  expect(spawned).toEqual(['sess-A', 'sess-B'])
+  expect(closed).toEqual(['sess-A'])
+})
+
 test('handoff commands get the session context attached, other prompts do not', { options: OPTIONS }, async ($, on) => {
   const clock = mock.clock(on)
   const seen: (readonly string[] | undefined)[] = []

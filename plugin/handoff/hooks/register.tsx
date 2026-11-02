@@ -283,6 +283,8 @@ const draftSkill = async (
 let api: { base: string; headers: Record<string, string> } | undefined
 let refreshNow: (() => Promise<void>) | undefined
 
+const sessionOf = (id: string) => id.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64)
+
 const openPane = async ($: EngineInterface) => {
   await update($, view, () => LIST)
   await $.ui.open({ id: PANE, title: 'Handoffs', focus: true, closeOnEscape: true })
@@ -477,7 +479,258 @@ const pressCheck = async ($: EngineInterface, id: number, item: number, isDone: 
   }
 }
 
+type Setup = { base: string; token: string; hasToasts: boolean; hasBand: boolean }
+
+let connection: { session: string; stop: () => void } | undefined
+
+const connect = ($: EngineInterface, setup: Setup, startedIn: string, session: string) => {
+  const { base, token, hasToasts, hasBand } = setup
+  const headers = { Authorization: `Bearer ${token}` }
+  api = { base, headers }
+  void update($, inbox, box => ({ ...box, session })).catch(() => undefined)
+  let project = ''
+  let projects: string[] = []
+  let locatedIn = ''
+  let isRejected = false
+  let isStale = false
+  let isStopped = false
+  let running: Promise<void> | undefined
+  let retry: { cancel: () => void } | undefined
+  let retryIn = RETRY_FIRST_MS
+  let curl: ReturnType<EngineInterface['process']['spawn']> | undefined
+
+  const locate = async () => {
+    const cwd = await $.session.cwd().catch(() => startedIn)
+
+    if (cwd !== locatedIn) {
+      const remote = await $.process.run(['git', 'remote', 'get-url', 'origin'], { cwd }).catch(() => ({ stdout: '' }))
+      const children =
+        remote.stdout.trim() === ''
+          ? await $.process.run(['sh', '-c', WORKSPACE_SCAN], { cwd }).catch(() => ({ stdout: '' }))
+          : { stdout: '' }
+      locatedIn = cwd
+      projects = projectsOf(remote.stdout, children.stdout, cwd)
+      project = projects.length === 1 ? (projects[0] ?? '') : projectOf('', cwd)
+    }
+  }
+
+  const load = async () => {
+    await locate()
+    const query = projects.map(name => `project=${encodeURIComponent(name)}`).join('&')
+    const answer = await new Promise<Awaited<ReturnType<typeof $.http.fetch>> | undefined>(resolve => {
+      const limit = $.clock.after(LOAD_TIMEOUT_MS, () => resolve(undefined))
+      void $.http
+        .fetch(`${base}/api/v1/inbox?${query}`, { headers })
+        .catch(() => undefined)
+        .then(got => {
+          limit.cancel()
+          resolve(got)
+        })
+    })
+
+    if (isStopped) {
+      return
+    }
+
+    if (answer === undefined || answer.status >= 500) {
+      const since = await $.clock.now()
+      await update($, inbox, box => ({ ...box, isOffline: true, offlineSince: (box.isOffline && box.offlineSince) || since }))
+
+      if (retry === undefined) {
+        retry = $.clock.after(retryIn, () => {
+          retry = undefined
+          void refresh()
+        })
+        retryIn = Math.min(retryIn * 2, RETRY_MAX_MS)
+      }
+
+      return
+    }
+
+    retry?.cancel()
+    retry = undefined
+    retryIn = RETRY_FIRST_MS
+
+    if (answer.status === 401) {
+      if (!isRejected) {
+        $.ui.toast('Handoff: the server rejected your token. Update it in /plugin.', { timeoutMs: 10000 })
+      }
+
+      isRejected = true
+      $.ui.status('token rejected')
+
+      return
+    }
+
+    if (!answer.ok) {
+      return
+    }
+
+    const body = JSON.parse(answer.text) as {
+      user: string
+      team: string
+      projects?: string[]
+      unread_replies?: number
+      threads?: Thread[]
+      waiting: number
+      waiting_for_project: number
+      unread?: number
+      overdue: number
+      taken_by_me: number
+      returned: number
+      rows: Row[]
+      returned_rows: Row[]
+      hidden_rows?: Row[]
+    }
+    const fresh: Inbox = {
+      isLoaded: true,
+      isOffline: false,
+      offlineSince: null,
+      session,
+      user: body.user,
+      team: body.team,
+      project,
+      projects: body.projects && body.projects.length > 0 ? body.projects : projects,
+      waiting: body.waiting,
+      waitingForProject: body.waiting_for_project,
+      unread: body.unread ?? 0,
+      overdue: body.overdue,
+      takenByMe: body.taken_by_me,
+      returned: body.returned,
+      rows: body.rows.slice(0, 50),
+      returnedRows: body.returned_rows.slice(0, 20),
+      hiddenRows: (body.hidden_rows ?? []).slice(0, 50),
+      unreadReplies: body.unread_replies ?? 0,
+      threads: (body.threads ?? []).slice(0, 20),
+    }
+    isRejected = false
+    await update($, inbox, () => fresh)
+    await update($, latest, shown => {
+      const isTakenNow = shown?.type === 'new' && !body.rows.some(row => row.id === shown.id && row.status === 'sent')
+      const isReadNow = shown?.type === 'reply' && !fresh.threads.some(thread => thread.id === shown.id)
+
+      return isTakenNow || isReadNow ? null : shown
+    })
+    const summary = summarize(fresh)
+    $.ui.status(!hasBand && summary !== undefined ? `${summary} · /handoffs` : undefined)
+  }
+
+  const refresh = (): Promise<void> => {
+    isStale = true
+    running ??= (async () => {
+      try {
+        while (isStale) {
+          isStale = false
+          await load()
+        }
+      } catch {
+        isStale = false
+      } finally {
+        running = undefined
+      }
+    })()
+
+    return running
+  }
+
+  const receive = (line: string) => {
+    if (isStopped) {
+      return
+    }
+
+    if (line.startsWith(': connected')) {
+      void refresh()
+
+      return
+    }
+
+    if (!line.startsWith('data: ')) {
+      return
+    }
+
+    let event: HandoffEvent | { type: 'resync' }
+
+    try {
+      event = JSON.parse(line.slice(6))
+    } catch {
+      return
+    }
+
+    if (event.type !== 'resync' && event.notify) {
+      const shown = event
+      void update($, latest, () => shown)
+
+      if (hasToasts) {
+        $.ui.toast(printable(describeEvent(shown)), { timeoutMs: 8000 })
+      }
+    }
+
+    void refresh()
+  }
+
+  const listen = async () => {
+    const stream = $.process.spawn({
+      argv: ['curl', '-sN', '--fail', '--connect-timeout', '10', '--speed-limit', '1', '--speed-time', '60', '-K', '-'],
+      input: `url = "${base}/api/v1/events${session === '' ? '' : `?session=${session}`}"\nheader = "Authorization: Bearer ${token}"\n`,
+    })
+    curl = stream
+    let rest = ''
+
+    for await (const piece of stream) {
+      if (!('text' in piece) || piece.stream !== 'stdout') {
+        continue
+      }
+
+      const lines = (rest + piece.text).split('\n')
+      rest = lines.pop() ?? ''
+      lines.forEach(receive)
+    }
+  }
+
+  const follow = async () => {
+    await refresh()
+    let wait = 2000
+
+    while (!isRejected && !isStopped) {
+      const connectedAt = await $.clock.now()
+      await listen().catch(() => undefined)
+      const lived = (await $.clock.now()) - connectedAt
+      wait = lived > 30000 ? 2000 : Math.min(wait * 2, 60000)
+      await $.clock.sleep(wait)
+
+      if (isStopped) {
+        return
+      }
+
+      await refresh()
+    }
+  }
+
+  refreshNow = refresh
+  void follow().catch(() => undefined)
+  const tick = $.clock.every(SAFETY_REFRESH_MS, () => {
+    void refresh()
+    void findUpdate($).catch(() => undefined)
+  })
+
+  const stop = () => {
+    isStopped = true
+    tick.cancel()
+    retry?.cancel()
+    void curl?.return({ code: null, signal: null }).catch(() => undefined)
+  }
+
+  return { session, stop }
+}
+
 export const register: Register = (on, options) => {
+  const setup = (): Setup => ({
+    base: String(options.url ?? ''),
+    token: String(options.token ?? ''),
+    hasToasts: options.notifications !== false,
+    hasBand: options.band !== false,
+  })
+
   on('tool.call', { tool: TAKE_TOOL }, async ($, e, next) => {
     const ran = await next(e)
     const id = /"id":\s*(\d+)/.exec(ran.text ?? '')?.[1]
@@ -498,10 +751,7 @@ export const register: Register = (on, options) => {
       return started
     }
 
-    const base = String(options.url ?? '')
-    const token = String(options.token ?? '')
-    const hasToasts = options.notifications !== false
-    const problem = configProblem(base, token)
+    const problem = configProblem(String(options.url ?? ''), String(options.token ?? ''))
 
     if (problem !== undefined) {
       $.ui.toast(`Handoff is not connected: ${problem}. Fix it in /plugin.`, { timeoutMs: 10000 })
@@ -509,222 +759,29 @@ export const register: Register = (on, options) => {
       return started
     }
 
-    const headers = { Authorization: `Bearer ${token}` }
-    api = { base, headers }
-    const session = (await $.session.id().catch(() => '')).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64)
-    await update($, inbox, box => ({ ...box, session }))
-    let project = ''
-    let projects: string[] = []
-    let locatedIn = ''
-    let isRejected = false
-    let isStale = false
-    let running: Promise<void> | undefined
-    let retry: { cancel: () => void } | undefined
-    let retryIn = RETRY_FIRST_MS
-
-    const locate = async () => {
-      const cwd = await $.session.cwd().catch(() => e.cwd)
-
-      if (cwd !== locatedIn) {
-        const remote = await $.process.run(['git', 'remote', 'get-url', 'origin'], { cwd }).catch(() => ({ stdout: '' }))
-        const children =
-          remote.stdout.trim() === ''
-            ? await $.process.run(['sh', '-c', WORKSPACE_SCAN], { cwd }).catch(() => ({ stdout: '' }))
-            : { stdout: '' }
-        locatedIn = cwd
-        projects = projectsOf(remote.stdout, children.stdout, cwd)
-        project = projects.length === 1 ? (projects[0] ?? '') : projectOf('', cwd)
-      }
-    }
-
-    const load = async () => {
-      await locate()
-      const query = projects.map(name => `project=${encodeURIComponent(name)}`).join('&')
-      const answer = await new Promise<Awaited<ReturnType<typeof $.http.fetch>> | undefined>(resolve => {
-        const limit = $.clock.after(LOAD_TIMEOUT_MS, () => resolve(undefined))
-        void $.http
-          .fetch(`${base}/api/v1/inbox?${query}`, { headers })
-          .catch(() => undefined)
-          .then(got => {
-            limit.cancel()
-            resolve(got)
-          })
-      })
-
-      if (answer === undefined || answer.status >= 500) {
-        const since = await $.clock.now()
-        await update($, inbox, box => ({ ...box, isOffline: true, offlineSince: (box.isOffline && box.offlineSince) || since }))
-
-        if (retry === undefined) {
-          retry = $.clock.after(retryIn, () => {
-            retry = undefined
-            void refresh()
-          })
-          retryIn = Math.min(retryIn * 2, RETRY_MAX_MS)
-        }
-
-        return
-      }
-
-      retry?.cancel()
-      retry = undefined
-      retryIn = RETRY_FIRST_MS
-
-      if (answer.status === 401) {
-        if (!isRejected) {
-          $.ui.toast('Handoff: the server rejected your token. Update it in /plugin.', { timeoutMs: 10000 })
-        }
-
-        isRejected = true
-        $.ui.status('token rejected')
-
-        return
-      }
-
-      if (!answer.ok) {
-        return
-      }
-
-      const body = JSON.parse(answer.text) as {
-        user: string
-        team: string
-        projects?: string[]
-        unread_replies?: number
-        threads?: Thread[]
-        waiting: number
-        waiting_for_project: number
-        unread?: number
-        overdue: number
-        taken_by_me: number
-        returned: number
-        rows: Row[]
-        returned_rows: Row[]
-        hidden_rows?: Row[]
-      }
-      const fresh: Inbox = {
-        isLoaded: true,
-        isOffline: false,
-        offlineSince: null,
-        session,
-        user: body.user,
-        team: body.team,
-        project,
-        projects: body.projects && body.projects.length > 0 ? body.projects : projects,
-        waiting: body.waiting,
-        waitingForProject: body.waiting_for_project,
-        unread: body.unread ?? 0,
-        overdue: body.overdue,
-        takenByMe: body.taken_by_me,
-        returned: body.returned,
-        rows: body.rows.slice(0, 50),
-        returnedRows: body.returned_rows.slice(0, 20),
-        hiddenRows: (body.hidden_rows ?? []).slice(0, 50),
-        unreadReplies: body.unread_replies ?? 0,
-        threads: (body.threads ?? []).slice(0, 20),
-      }
-      isRejected = false
-      await update($, inbox, () => fresh)
-      await update($, latest, shown => {
-        const isTakenNow = shown?.type === 'new' && !body.rows.some(row => row.id === shown.id && row.status === 'sent')
-        const isReadNow = shown?.type === 'reply' && !fresh.threads.some(thread => thread.id === shown.id)
-
-        return isTakenNow || isReadNow ? null : shown
-      })
-      const summary = summarize(fresh)
-      $.ui.status(options.band === false && summary !== undefined ? `${summary} · /handoffs` : undefined)
-    }
-
-    const refresh = (): Promise<void> => {
-      isStale = true
-      running ??= (async () => {
-        try {
-          while (isStale) {
-            isStale = false
-            await load()
-          }
-        } catch {
-          isStale = false
-        } finally {
-          running = undefined
-        }
-      })()
-
-      return running
-    }
-
-    const receive = (line: string) => {
-      if (line.startsWith(': connected')) {
-        void refresh()
-
-        return
-      }
-
-      if (!line.startsWith('data: ')) {
-        return
-      }
-
-      let event: HandoffEvent | { type: 'resync' }
-
-      try {
-        event = JSON.parse(line.slice(6))
-      } catch {
-        return
-      }
-
-      if (event.type !== 'resync' && event.notify) {
-        const shown = event
-        void update($, latest, () => shown)
-
-        if (hasToasts) {
-          $.ui.toast(printable(describeEvent(shown)), { timeoutMs: 8000 })
-        }
-      }
-
-      void refresh()
-    }
-
-    const listen = async () => {
-      const curl = $.process.spawn({
-        argv: ['curl', '-sN', '--fail', '--connect-timeout', '10', '--speed-limit', '1', '--speed-time', '60', '-K', '-'],
-        input: `url = "${base}/api/v1/events${session === '' ? '' : `?session=${session}`}"\nheader = "Authorization: Bearer ${token}"\n`,
-      })
-      let rest = ''
-
-      for await (const piece of curl) {
-        if (!('text' in piece) || piece.stream !== 'stdout') {
-          continue
-        }
-
-        const lines = (rest + piece.text).split('\n')
-        rest = lines.pop() ?? ''
-        lines.forEach(receive)
-      }
-    }
-
-    const follow = async () => {
-      await refresh()
-      let wait = 2000
-
-      while (!isRejected) {
-        const connectedAt = await $.clock.now()
-        await listen().catch(() => undefined)
-        const lived = (await $.clock.now()) - connectedAt
-        wait = lived > 30000 ? 2000 : Math.min(wait * 2, 60000)
-        await $.clock.sleep(wait)
-        await refresh()
-      }
-    }
-
-    refreshNow = refresh
-    void follow().catch(() => undefined)
+    connection?.stop()
+    connection = connect($, setup(), e.cwd, sessionOf(await $.session.id().catch(() => '')))
     void findUpdate($).catch(() => undefined)
-    $.clock.every(SAFETY_REFRESH_MS, () => {
-      void refresh()
-      void findUpdate($).catch(() => undefined)
-    })
 
     return started
   })
+
+  on('classic.SessionStart', async ($, e, next) => {
+    const session = sessionOf(e.session_id)
+
+    if (connection !== undefined && session !== '' && session !== connection.session) {
+      connection.stop()
+      connection = connect($, setup(), e.cwd, session)
+    }
+
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('session.end', async ($, e, next) => {
+    connection?.stop()
+
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   on('prompt.submit', async ($, e, next) => {
     const box = await read($, inbox)
