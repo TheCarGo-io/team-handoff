@@ -1,7 +1,7 @@
 ---
 description: Hand a handoff report back to its sender as needs-changes (missing detail, wrong contract)
 argument-hint: <id> <what to change>
-allowed-tools: mcp__plugin_handoff_handoff__resolve
+allowed-tools: mcp__handoff__resolve
 ---
 
 Hand a handoff report back with the handoff `resolve` tool, `status: "needs-changes"`. Request: $ARGUMENTS

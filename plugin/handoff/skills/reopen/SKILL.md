@@ -1,7 +1,7 @@
 ---
 description: Reopen a handoff report that was closed or marked done (closed by mistake, or the work is not actually finished)
 argument-hint: <id> [reason]
-allowed-tools: mcp__plugin_handoff_handoff__reopen, mcp__plugin_handoff_handoff__get
+allowed-tools: mcp__handoff__reopen, mcp__handoff__get
 ---
 
 Reopen a handoff report with the handoff `reopen` tool. Request: $ARGUMENTS

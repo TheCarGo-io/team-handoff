@@ -1,7 +1,7 @@
 ---
 description: Take one or several handoff reports, or pick up a reply on one, and start working on them
 argument-hint: <id [id ...] | next | all>
-allowed-tools: mcp__plugin_handoff_handoff__take, mcp__plugin_handoff_handoff__get, mcp__plugin_handoff_handoff__inbox, mcp__plugin_handoff_handoff__check
+allowed-tools: mcp__handoff__take, mcp__handoff__get, mcp__handoff__inbox, mcp__handoff__check
 ---
 
 Pick up handoff work. Request: $ARGUMENTS

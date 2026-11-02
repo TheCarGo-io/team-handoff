@@ -1,7 +1,7 @@
 ---
 description: Send a handoff report to another team from this session's work
 argument-hint: <team> [@person] [what to report] [priority] [due]
-allowed-tools: mcp__plugin_handoff_handoff__send, Bash(date:*), Bash(git log:*), Bash(git status:*), Bash(gh pr view:*), Bash(gh pr list:*)
+allowed-tools: mcp__handoff__send, Bash(date:*), Bash(git log:*), Bash(git status:*), Bash(gh pr view:*), Bash(gh pr list:*)
 ---
 
 Send a handoff report with the handoff `send` tool. Request: $ARGUMENTS

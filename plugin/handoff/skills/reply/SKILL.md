@@ -1,7 +1,7 @@
 ---
 description: Reply under a handoff report: ask the sender a question, report an issue, answer one, or say what was done
 argument-hint: <id> <message>
-allowed-tools: mcp__plugin_handoff_handoff__reply, mcp__plugin_handoff_handoff__get
+allowed-tools: mcp__handoff__reply, mcp__handoff__get
 ---
 
 Add a reply to a handoff report with the handoff `reply` tool. Request: $ARGUMENTS

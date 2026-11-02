@@ -1,7 +1,7 @@
 ---
 description: Tick checklist items of a handoff report my team received as finished
 argument-hint: <id> <item numbers>
-allowed-tools: mcp__plugin_handoff_handoff__check, mcp__plugin_handoff_handoff__get
+allowed-tools: mcp__handoff__check, mcp__handoff__get
 ---
 
 Tick checklist items with the handoff `check` tool. Request: $ARGUMENTS

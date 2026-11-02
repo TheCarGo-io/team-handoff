@@ -9,7 +9,7 @@ Two parts in this repo:
 | Part | Where | What it is |
 |---|---|---|
 | Server | `app/` | FastAPI + PostgreSQL (+ Redis for live events). REST under `/api/v1`, an SSE stream at `/api/v1/events`, MCP tools at `/mcp/` |
-| Plugin | `plugin/handoff/` | Claude Code plugin: skills (`/handoff:send` …), the MCP connection, terminal notifications |
+| Plugin | `plugin/handoff/` | Claude Code plugin: skills (`/handoff:send` …), the `mcp__handoff__*` tools, terminal notifications, workspaces |
 
 The repo root is also the plugin marketplace (`.claude-plugin/marketplace.json`).
 
@@ -125,6 +125,7 @@ tries again after 15 and 30 seconds, then every minute; `[ Retry ]` tries at onc
 | `/handoff:return <id> <what to change>` | Hands it back to the sender as needs-changes |
 | `/handoff:edit <id> <change>` | Updates a report I sent; the receiver is notified |
 | `/handoff:withdraw <id>` | Deletes a report I sent, for everyone |
+| `/handoff-workspaces` | Lists the handoff servers this machine knows, adds one (name, URL, token) or removes one. The pane's switcher (`w`) moves between them |
 | `/handoffs` | Opens the inbox in a side pane: click a title to read the report in full (text and replies), Take, Continue, Fix, Reply, Done, close (press twice, no model call). Tick `[ ]` on several rows and press "Take N selected" to take them together. `hide` removes a report from your own list and counts only (it stays where it is for everyone else, and sits under "hidden from your list"); Close ends it for everyone, is not offered on a report a teammate holds, and can be undone from the pane or with `/handoff:reopen`. Listing and reading cost no tokens and do not take the report |
 
 Notifications cost no tokens: the plugin holds one `curl` stream to `/api/v1/events` per interactive session
@@ -151,6 +152,31 @@ The plugin reads the session's project from `git remote get-url origin`; in a fo
 it takes the repositories inside it. It shows how many reports wait for those, and attaches the user, team,
 projects and open report ids as context to every `/handoff:` command, so the skills do not look them up.
 Unread replies show under "Replies for you" in every session until read; Take on one hands the thread to Claude.
+
+### Tools and permissions
+
+The plugin serves Claude's handoff tools itself as `mcp__handoff__<name>` (0.6.3 and later; before that they
+came from an MCP entry as `mcp__plugin_handoff_handoff__<name>`). It forwards each call to the workspace's
+`/mcp/` with that workspace's token and passes the server's instructions on to Claude.
+
+`inbox`, `board` and `get` only read and run without asking. Every other tool (take, reply, resolve, close …)
+goes through Claude Code's permission check first: an allow rule runs it, a deny rule refuses it, and anything
+else asks "Allow handoff take #41?". In auto mode the classifier is not asked, so without rules every write
+asks. To stop the questions for the writes you trust, add allow rules in `/permissions`, for example
+`mcp__handoff__take`, `mcp__handoff__reply`, `mcp__handoff__check`, `mcp__handoff__resolve`; keeping `close`
+and `withdraw` on ask is a good default. The plugin never adds rules by itself.
+
+### Workspaces
+
+A workspace is a whole team server (say TheCargo and GoWay). The one set in `/plugin` is always the first and
+is read from there, so a new token in `/plugin` reaches every session. `/handoff-workspaces` adds more (an
+`https://` URL, or plain http only on this machine: localhost, 127.0.0.1); the token is checked against the server, then kept on this machine in the plugin's own data file (readable by
+you only), never in a prompt. With more than one, the pane header shows `[ TheCargo 4 ]  GoWay 2●` (waiting
+reports, ● for unread replies); `w` or a click switches. A switch is per session: the pane, the line above the
+prompt and the event stream move at once, Claude's tools move with your next message, which also tells Claude
+that report numbers from earlier in the conversation belong to the other workspace. Until then the line says
+`Claude is still on TheCargo until your next message`. A subagent keeps the workspace of the turn that started
+it. New sessions start on the workspace you switched to last; `/clear` and `/reload-plugins` keep it.
 
 ## Plugin development
 

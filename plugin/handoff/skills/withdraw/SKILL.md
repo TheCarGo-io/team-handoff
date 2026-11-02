@@ -1,7 +1,7 @@
 ---
 description: Withdraw a handoff report I sent — deletes it for everyone (sent by mistake, or it contains something it should not)
 argument-hint: <id>
-allowed-tools: mcp__plugin_handoff_handoff__get
+allowed-tools: mcp__handoff__get
 disable-model-invocation: true
 ---
 

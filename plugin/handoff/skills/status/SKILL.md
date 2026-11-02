@@ -1,7 +1,7 @@
 ---
 description: What is happening where: handoff reports grouped by project and service, with who holds what and what is not shipped yet
 argument-hint: [project]
-allowed-tools: mcp__plugin_handoff_handoff__board
+allowed-tools: mcp__handoff__board
 ---
 
 Show the state of handoff work per project with the handoff `board` tool (pass `project` only if one is named: $ARGUMENTS).

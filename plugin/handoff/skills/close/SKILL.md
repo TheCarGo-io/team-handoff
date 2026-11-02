@@ -1,7 +1,7 @@
 ---
 description: Close a handoff report that is not needed (duplicate, obsolete, not for us) — anyone can, no reason required
 argument-hint: <id> [note]
-allowed-tools: mcp__plugin_handoff_handoff__close
+allowed-tools: mcp__handoff__close
 ---
 
 Close a handoff report with the handoff `close` tool. Request: $ARGUMENTS

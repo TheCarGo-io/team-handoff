@@ -1,6 +1,9 @@
+import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
 import {
+  argsOf,
+  askText,
   configProblem,
   describeAge,
   describeClock,
@@ -11,10 +14,16 @@ import {
   describeWhen,
   heldHere,
   isNewer,
+  isWorkspace,
+  nameOf,
   parseInstall,
   projectOf,
   projectsOf,
+  rpcBody,
   summarize,
+  switchNote,
+  textOf,
+  transportProblem,
 } from './register'
 
 const OPTIONS = { url: 'http://handoff.test', token: 'ho_test' }
@@ -30,6 +39,8 @@ const INBOX = {
   rows: [],
   returned_rows: [],
 }
+const MCP_IDLE = { value: { status: 200, ok: true, headers: {}, text: '{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}' } }
+const isMcp = (url: string) => url.endsWith('/mcp/')
 const NEW = {
   type: 'new',
   id: 12,
@@ -174,6 +185,10 @@ test('session start loads the inbox for this project and shows the count', { opt
     },
   }))
   on('http.fetch', ($$, e) => {
+    if (isMcp(e.url)) {
+      return MCP_IDLE
+    }
+
     fetched.push({ url: e.url, auth: e.init?.headers?.Authorization })
 
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(INBOX) } }
@@ -245,13 +260,23 @@ test('a rejected token is reported once and stops the listener', { options: OPTI
   expect(spawns).toEqual(0)
 })
 
-test('a non-interactive session makes no request and starts no listener', { options: OPTIONS }, async ($, on) => {
+test('a non-interactive session registers the tools but loads no inbox and starts no listener', { options: OPTIONS }, async ($, on) => {
   mock.clock(on)
   on('session.start', ($$, e) => ({ cwd: e.cwd }))
   on('command.register', ($$, e) => ({ value: { command: e.name } }))
+  const tools: string[] = []
   let calls = 0
 
-  on('http.fetch', () => {
+  on('tool.register', ($$, e) => {
+    tools.push(e.name)
+
+    return { value: { tool: `mcp__handoff__${e.name}` } }
+  })
+  on('http.fetch', ($$, e) => {
+    if (isMcp(e.url)) {
+      return MCP_IDLE
+    }
+
     calls += 1
 
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(INBOX) } }
@@ -265,6 +290,9 @@ test('a non-interactive session makes no request and starts no listener', { opti
   await $.session.start({ ...START, isInteractive: false })
 
   expect(calls).toEqual(0)
+  expect(tools).toContain('take')
+  expect(tools).toContain('close')
+  expect(tools.length).toEqual(13)
 })
 
 test('a bad server URL is reported instead of being handed to curl', { options: { ...OPTIONS, url: 'https://h.io/' } }, async ($, on) => {
@@ -344,6 +372,10 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const closes: string[] = []
 
     on('http.fetch', ($$, e) => {
+      if (isMcp(e.url)) {
+        return MCP_IDLE
+      }
+
       if (e.init?.method === 'POST') {
         closes.push(e.url)
       }
@@ -557,7 +589,11 @@ test('a request that hangs is given up, shown as offline and retried', { options
   on('process.run', () => ({
     value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
   }))
-  on('http.fetch', async () => {
+  on('http.fetch', async ($$, e) => {
+    if (isMcp(e.url)) {
+      return MCP_IDLE
+    }
+
     calls += 1
     const call = calls
 
@@ -646,6 +682,19 @@ test('a report I hold lives in the session it was put in, my other sessions tuck
     },
   }))
   on('http.fetch', ($$, e) => {
+    if (isMcp(e.url)) {
+      const body = JSON.parse(String(e.init?.body ?? '{}')) as { method?: string; params?: { name?: string; arguments?: unknown } }
+
+      if (body.method === 'tools/call') {
+        calls.push(`MCP ${body.params?.name} ${JSON.stringify(body.params?.arguments)}`)
+        const text = JSON.stringify({ notice: 'data', id: 31, status: 'taken' })
+
+        return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text }] } }) } }
+      }
+
+      return MCP_IDLE
+    }
+
     if (e.init?.method !== undefined) {
       calls.push(`${e.init.method} ${e.url} ${e.init.body ?? ''}`.trim())
     }
@@ -661,7 +710,7 @@ test('a report I hold lives in the session it was put in, my other sessions tuck
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
   on('ui.render', ($$, e) => h($$.ui.resolve(e).Box, {}) as never)
-  on('tool.call', () => ({ result: {}, text: '{"notice": "data", "id": 31, "status": "taken"}' }) as never)
+  on('tool.check', () => ({ decision: 'allow' }) as never)
 
   await $.session.start(START)
   await clock.advance(10)
@@ -705,8 +754,9 @@ test('a report I hold lives in the session it was put in, my other sessions tuck
   await pane.press({ key: 'here-22' })
   expect(calls.at(-1)).toEqual('PUT http://handoff.test/api/v1/reports/22/session {"session":"sess-A","label":"thecargo-frontend"}')
 
-  await $.tool.call({ tool: 'mcp__plugin_handoff_handoff__take', tool_input: { report_id: 31 } } as never)
+  await $.tool.call({ tool: 'mcp__handoff__take', report_id: 31 } as never)
   await clock.settle()
+  expect(calls.at(-2)).toEqual('MCP take {"report_id":31}')
   expect(calls.at(-1)).toEqual('PUT http://handoff.test/api/v1/reports/31/session {"session":"sess-A","label":"thecargo-frontend"}')
 
   const state = { ...box, user: 'ali', team: 'frontend', projects: ['thecargo-frontend'], session: 'sess-A', threads: [], takenByMe: 4 }
@@ -824,4 +874,403 @@ test('handoff commands get the session context attached, other prompts do not', 
   expect(describeContext(workspace as never)).toContain(
     "this session's projects (a workspace of repositories): a, b",
   )
+})
+
+test('workspace helpers: names, notes, arguments, answers and the ask line', () => {
+  expect(nameOf('https://handoff.demo.thecargo.io')).toEqual('thecargo')
+  expect(nameOf('https://handoff.goway.uz')).toEqual('goway')
+  expect(nameOf('http://127.0.0.1:8013')).toEqual('127.0.0.1:8013')
+  expect(switchNote('GoWay', 'TheCargo')).toContain('Report numbers mentioned earlier in this conversation refer to TheCargo')
+  expect(argsOf({ tool: 'mcp__handoff__take', tool_use_id: 'x', report_id: 4, project: undefined }, ['report_id', 'project'])).toEqual({ report_id: 4 })
+  expect(rpcBody('{"jsonrpc":"2.0","id":1,"result":{"ok":true}}')?.result).toEqual({ ok: true })
+  expect(rpcBody('event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"a":1}}\n\n')?.result).toEqual({ a: 1 })
+  expect(rpcBody('<html>')).toEqual(undefined)
+  expect(textOf({ content: [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }] })).toEqual('a\nb')
+  expect(askText('close', { report_id: 41 }, 'GoWay')).toEqual('Allow handoff close #41 on GoWay?')
+  expect(askText('send', {}, undefined)).toEqual('Allow handoff send?')
+  expect(isWorkspace({ id: 'ws-1', name: 'GoWay', url: 'https://h.goway.uz', token: 'ho_x' })).toEqual(true)
+  expect(isWorkspace({ id: 'default', name: 'X', url: 'https://h.goway.uz', token: 'ho_x' })).toEqual(false)
+  expect(isWorkspace({ id: 'ws-1', name: 'GoWay', url: 'https://h.goway.uz/', token: 'ho_x' })).toEqual(false)
+  expect(isWorkspace({ id: 'ws-1', name: 'GoWay', url: 'http://h.goway.uz', token: 'ho_x' })).toEqual(false)
+  expect(transportProblem('https://h.goway.uz')).toEqual(undefined)
+  expect(transportProblem('http://127.0.0.1:8022')).toEqual(undefined)
+  expect(transportProblem('http://localhost:8022')).toEqual(undefined)
+  expect(transportProblem('http://[::1]:8022')).toEqual(undefined)
+  expect(transportProblem('http://h.goway.uz')).toContain('https://')
+  expect(transportProblem('http://127.0.0.1.evil.io')).toContain('https://')
+})
+
+const GOWAY = { id: 'ws-gw', name: 'GoWay', url: 'https://goway.test', token: 'ho_gw' }
+const TC_ROW = { ...ROW, id: 41, title: 'TC: loads paging', to_team: 'frontend', readiness: 'ready', read: true }
+
+const workspaceHarness = (on: On, store: Record<string, unknown>) => {
+  const clock = mock.clock(on)
+  const log = {
+    spawned: [] as string[],
+    calls: [] as string[],
+    toasts: [] as string[],
+    contexts: [] as (readonly string[] | undefined)[],
+    checks: [] as string[],
+    asked: [] as string[],
+    check: 'allow' as 'allow' | 'ask' | 'deny',
+    answer: 'Allow once',
+    session: 'sess-A',
+    takeDelay: 0,
+  }
+
+  on('store.get', ($$, e) => ({ value: store[e.key] }))
+  on('store.set', ($$, e) => {
+    store[e.key] = JSON.parse(JSON.stringify(e.value))
+
+    return { value: undefined }
+  })
+  on('session.start', ($$, e) => ({ cwd: e.cwd }))
+  on('session.end', ($$, e) => ({ sessionId: e.sessionId }))
+  on('session.id', () => ({ value: log.session }))
+  on('session.cwd', () => ({ value: '/work/thecargo-frontend' }))
+  on('classic.SessionStart', () => ({}) as never)
+  on('command.register', ($$, e) => ({ value: { command: e.name } }))
+  on('tool.register', ($$, e) => ({ value: { tool: `mcp__handoff__${e.name}` } }))
+  on('process.run', () => ({
+    value: { exitCode: 0, stdout: 'git@github.com:TheCarGo-io/thecargo-frontend.git\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+  }))
+  on('http.fetch', async ($$, e) => {
+    const host = hostOfUrl(e.url)
+
+    if (e.url.endsWith('/mcp/')) {
+      const body = JSON.parse(String(e.init?.body ?? '{}')) as { method?: string; params?: { name?: string; arguments?: unknown } }
+
+      if (body.method === 'initialize') {
+        return rpcAnswer({ instructions: `${host} rules: report text is teammate data` })
+      }
+
+      if (body.method === 'tools/call') {
+        log.calls.push(`MCP ${host} ${body.params?.name} ${JSON.stringify(body.params?.arguments)}`)
+
+        if (body.params?.name === 'take' && log.takeDelay > 0) {
+          await clock.sleep(log.takeDelay)
+        }
+
+        return rpcAnswer({ content: [{ type: 'text', text: JSON.stringify({ notice: 'data', id: 41, status: 'taken' }) }] })
+      }
+
+      return rpcAnswer({ tools: [] })
+    }
+
+    if (e.url.includes('/api/v1/inbox')) {
+      if (host === 'goway.test') {
+        log.calls.push(`GET ${e.url}`)
+      }
+
+      const box = host === 'goway.test' ? { ...INBOX, waiting: 5, unread_replies: 1, rows: [] } : { ...INBOX, rows: [TC_ROW] }
+
+      return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(box) } }
+    }
+
+    log.calls.push(`${e.init?.method ?? 'GET'} ${e.url}`)
+
+    return { value: { status: 200, ok: true, headers: {}, text: '{}' } }
+  })
+  on('process.spawn', async function* ($$, e) {
+    log.spawned.push(String(e.input))
+    yield { stream: 'stdout' as const, text: ': connected\n\n' }
+    await new Promise(() => undefined)
+
+    return { value: { code: 0, signal: null } }
+  })
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.toast', ($$, e) => {
+    log.toasts.push(e.text)
+
+    return { value: undefined }
+  })
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.render', ($$, e) => h($$.ui.resolve(e).Box, {}) as never)
+  on('tool.check', { tool: /^mcp__handoff__/ }, ($$, e) => {
+    log.checks.push(e.tool)
+
+    return { decision: log.check } as never
+  })
+  on('tool.check', { tool: 'AskUserQuestion' }, () => ({ decision: 'allow' }) as never)
+  on('turn.start', ($$, e) => ({ turnId: e.turnId }))
+  on('tool.call', { tool: 'AskUserQuestion' }, ($$, e) => {
+    const question = (e as unknown as { questions: { question: string }[] }).questions[0]?.question ?? ''
+    log.asked.push(question)
+
+    return { result: { questions: [], answers: { [question]: log.answer } } } as never
+  })
+  on('prompt.submit', ($$, e) => {
+    log.contexts.push(e.context)
+
+    return { text: e.text } as never
+  })
+  on('prompt.compose', () => ({ sections: [] }))
+
+  return { clock, log }
+}
+
+const hostOfUrl = (url: string) => url.replace(/^https?:\/\//, '').replace(/[/?#].*$/, '')
+const rpcAnswer = (result: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ jsonrpc: '2.0', id: 1, result }) } })
+const PANE_PROPS = { plugin: 'handoff', surface: 'terminal', component: 'Pane', requestId: 'handoffs', props: { title: 'Handoffs', isFocused: true } } as const
+const IDLE = { origin: { kind: 'composer' }, wait: false } as const
+
+test('one workspace looks like today: no switcher, no prefix, and the store never holds the options token', { options: OPTIONS }, async ($, on) => {
+  const store: Record<string, unknown> = {}
+  const { clock } = workspaceHarness(on, store)
+
+  await $.session.start(START)
+  await clock.advance(10)
+  const pane = await $.ui.mount(PANE_PROPS as never)
+
+  expect(await pane.find({ key: 'space-default' })).toEqual(undefined)
+  expect(JSON.stringify(store)).not.toContain('ho_test')
+})
+
+test('a switch moves the pane and stream, resets per-workspace state, and survives /clear and a reload', { options: OPTIONS }, async ($, on) => {
+  const store: Record<string, unknown> = { workspaces: [GOWAY] }
+  const { clock, log } = workspaceHarness(on, store)
+
+  await $.session.start(START)
+  await clock.advance(10)
+
+  expect(log.spawned.at(-1)).toContain('url = "http://handoff.test/api/v1/events?session=sess-A"')
+
+  const pane = await $.ui.mount(PANE_PROPS as never)
+
+  expect((await pane.find({ key: 'space-ws-gw' }))?.text).toContain('GoWay')
+  await pane.press({ key: 'close-41' })
+  await pane.press({ key: 'space-ws-gw' })
+  await clock.advance(10)
+
+  expect(log.spawned.at(-1)).toContain('url = "https://goway.test/api/v1/events?session=sess-A"')
+  expect(log.spawned.at(-1)).toContain('Bearer ho_gw')
+  expect(store.active).toEqual('ws-gw')
+  expect(log.toasts).toContain('Handoff: now on GoWay')
+  expect(log.calls.filter(call => call.includes('/close'))).toEqual([])
+
+  await $.session.end({ reason: 'clear', sessionId: 'sess-A', resume: { id: 'sess-A' } })
+  log.session = 'sess-B'
+  await $.classic.SessionStart({ source: 'clear', session_id: 'sess-B' })
+  await clock.advance(10)
+
+  expect(log.spawned.at(-1)).toContain('url = "https://goway.test/api/v1/events?session=sess-B"')
+
+  store.active = 'default'
+  await $.session.start(START)
+  await clock.advance(10)
+
+  expect(log.spawned.at(-1)).toContain('https://goway.test/api/v1/events')
+  expect(JSON.stringify(store)).not.toContain('ho_test')
+})
+
+test("Claude's tools follow a switch only from the next idle prompt; subagents keep their turn's workspace", { options: OPTIONS }, async ($, on) => {
+  const store: Record<string, unknown> = { workspaces: [GOWAY] }
+  const { clock, log } = workspaceHarness(on, store)
+  const inbox = (agentId?: string) => $.tool.call({ tool: 'mcp__handoff__inbox', ...(agentId ? { agentId } : {}) } as never)
+
+  await $.session.start(START)
+  await clock.advance(10)
+  await $.prompt.submit({ text: 'work on handoffs', ...IDLE } as never)
+  await $.turn.start({ text: 'work on handoffs', turnId: 't1' })
+  await inbox()
+
+  const pane = await $.ui.mount(PANE_PROPS as never)
+  await pane.press({ key: 'space-ws-gw' })
+  await clock.advance(10)
+  await inbox()
+  await $.turn.start({ text: 'sub', turnId: 't2', agentId: 'a1' })
+  await inbox('a1')
+  await $.prompt.submit({ text: 'agent done', origin: { kind: 'peer' }, wait: false } as never)
+  await $.turn.start({ text: 'agent done', turnId: 't3' })
+  await inbox()
+  await $.prompt.submit({ text: 'typed mid-turn', ...IDLE, turnId: 't3' } as never)
+  await inbox()
+
+  expect(log.calls.filter(call => call.startsWith('MCP'))).toEqual([
+    'MCP handoff.test inbox {}',
+    'MCP handoff.test inbox {}',
+    'MCP handoff.test inbox {}',
+    'MCP handoff.test inbox {}',
+    'MCP handoff.test inbox {}',
+  ])
+  expect(log.contexts.flat().filter(line => line?.startsWith('Handoff workspace is now'))).toEqual([])
+
+  await $.prompt.submit({ text: 'next thing', ...IDLE } as never)
+  await $.turn.start({ text: 'next thing', turnId: 't4' })
+  await inbox()
+  await inbox('a1')
+  await $.prompt.submit({ text: 'and another', ...IDLE } as never)
+
+  expect(log.calls.filter(call => call.startsWith('MCP')).slice(-2)).toEqual(['MCP goway.test inbox {}', 'MCP handoff.test inbox {}'])
+  expect(log.contexts.flat().filter(line => line?.startsWith('Handoff workspace is now'))).toEqual([switchNote('GoWay', 'handoff')])
+})
+
+test('every write passes the permission gate, and a refused ask never reaches the server', { options: OPTIONS }, async ($, on) => {
+  const { clock, log } = workspaceHarness(on, {})
+  const take = () => $.tool.call({ tool: 'mcp__handoff__take', report_id: 41 } as never)
+  const forwarded = () => log.calls.filter(call => call.startsWith('MCP')).length
+
+  await $.session.start(START)
+  await clock.advance(10)
+  await $.tool.call({ tool: 'mcp__handoff__board' } as never)
+
+  expect(log.checks).toEqual([])
+  expect(forwarded()).toEqual(1)
+
+  log.check = 'ask'
+  log.answer = 'Deny'
+  const refused = await take()
+
+  expect(log.asked).toEqual(['Allow handoff take #41?'])
+  expect(refused.deny).toContain('did not allow handoff take')
+  expect(forwarded()).toEqual(1)
+
+  log.check = 'deny'
+  await take()
+
+  expect(log.asked.length).toEqual(1)
+  expect(forwarded()).toEqual(1)
+
+  log.check = 'ask'
+  log.answer = 'Allow once'
+  await take()
+  await clock.settle()
+
+  expect(forwarded()).toEqual(2)
+  expect(log.calls.at(-1)).toEqual('PUT http://handoff.test/api/v1/reports/41/session')
+
+  log.check = 'allow'
+  await take()
+
+  expect(log.asked.length).toEqual(2)
+  expect(forwarded()).toEqual(3)
+})
+
+test('a take that resolves after a switch places the report on the workspace it was sent to', { options: OPTIONS }, async ($, on) => {
+  const store: Record<string, unknown> = { workspaces: [GOWAY] }
+  const { clock, log } = workspaceHarness(on, store)
+
+  await $.session.start(START)
+  await clock.advance(10)
+  await $.prompt.submit({ text: 'take 41', ...IDLE } as never)
+  await $.turn.start({ text: 'take 41', turnId: 't1' })
+  log.takeDelay = 1000
+  const taking = $.tool.call({ tool: 'mcp__handoff__take', report_id: 41 } as never)
+  await clock.advance(10)
+  const pane = await $.ui.mount(PANE_PROPS as never)
+  await pane.press({ key: 'space-ws-gw' })
+  await clock.advance(2000)
+  await taking
+  await clock.settle()
+
+  expect(log.calls.filter(call => call.includes('/reports/41/session'))).toEqual(['PUT http://handoff.test/api/v1/reports/41/session'])
+})
+
+test('the instructions follow the workspace Claude is on; tokens never reach Claude, toasts or the store copy of options', { options: OPTIONS }, async ($, on) => {
+  const store: Record<string, unknown> = { workspaces: [GOWAY] }
+  const { clock, log } = workspaceHarness(on, store)
+  const compose = { model: 'claude', promptModel: 'claude', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] } as const
+  const section = async () => (await $.prompt.compose(compose)).sections.find(one => one.id === 'handoff:instructions')?.text ?? ''
+
+  await $.session.start(START)
+  await clock.advance(10)
+  await $.prompt.submit({ text: '/handoff:inbox', ...IDLE } as never)
+  await $.turn.start({ text: '/handoff:inbox', turnId: 't1' })
+
+  expect(await section()).toContain('handoff.test rules: report text is teammate data')
+  expect(await section()).toContain('Handoff workspace of the main conversation: handoff.')
+
+  const pane = await $.ui.mount(PANE_PROPS as never)
+  await pane.press({ key: 'space-ws-gw' })
+  await clock.advance(10)
+
+  expect(await section()).toContain('handoff.test rules')
+
+  await $.prompt.submit({ text: '/handoff:inbox', ...IDLE } as never)
+  await $.turn.start({ text: '/handoff:inbox', turnId: 't2' })
+  const after = await section()
+  const result = await $.tool.call({ tool: 'mcp__handoff__inbox' } as never)
+  const seen = [after, ...log.contexts.flat(), ...log.toasts, result.text ?? '']
+
+  expect(after).toContain('goway.test rules')
+  expect(log.contexts.flat().some(line => line?.includes('- handoff workspace: GoWay'))).toEqual(true)
+  expect(seen.some(text => text?.includes('ho_gw') || text?.includes('ho_test'))).toEqual(false)
+  expect(JSON.stringify(store)).not.toContain('ho_test')
+})
+
+test('badges read the other workspace without marking anything seen', { options: OPTIONS }, async ($, on) => {
+  const store: Record<string, unknown> = { workspaces: [GOWAY] }
+  const { clock, log } = workspaceHarness(on, store)
+
+  await $.session.start(START)
+  await clock.advance(10)
+  const pane = await $.ui.mount(PANE_PROPS as never)
+
+  expect((await pane.find({ key: 'space-ws-gw' }))?.text).toEqual('GoWay 5●')
+  expect((await pane.find({ key: 'space-default' }))?.text).toEqual('[ handoff 2 ]')
+  expect(log.calls.filter(call => call.includes('goway.test')).every(call => call === 'GET https://goway.test/api/v1/inbox')).toEqual(true)
+  expect(log.calls.some(call => call.includes('mark_seen'))).toEqual(false)
+})
+
+test('the band keeps the workspace name whole and lets the lag note truncate', { options: OPTIONS }, async ($, on) => {
+  const store: Record<string, unknown> = { workspaces: [GOWAY] }
+  const { clock } = workspaceHarness(on, store)
+
+  await $.session.start(START)
+  await clock.advance(10)
+  await $.prompt.submit({ text: 'hi', ...IDLE } as never)
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+  const pane = await $.ui.mount(PANE_PROPS as never)
+  await pane.press({ key: 'space-ws-gw' })
+  await clock.advance(10)
+  const band = await $.ui.mount({ plugin: 'handoff', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false } } as never)
+  const label = await band.find({ key: 'band-label' })
+  const behind = await band.find({ key: 'band-behind' })
+
+  expect(label?.props.flexShrink).toEqual(0)
+  expect(label?.text).toContain('Handoff · GoWay')
+  expect(behind?.props.flexShrink).toEqual(1)
+  expect(behind?.text).toContain('Claude on handoff until your next message')
+  expect((await band.find({ type: 'Text', text: /Claude on handoff/ }))?.props.wrap).toEqual('truncate-end')
+})
+
+test('the add form refuses a plain-http server that is not on this machine', { options: OPTIONS }, async ($, on) => {
+  const store: Record<string, unknown> = {}
+  const { clock } = workspaceHarness(on, store)
+
+  await $.session.start(START)
+  await clock.advance(10)
+  await $.command.run({ command: 'handoff-workspaces' } as never).catch(() => undefined)
+  const pane = await $.ui.mount(PANE_PROPS as never)
+  await $.ui.input({ plugin: 'handoff', key: 'ws-name', text: 'GoWay', kind: 'change' })
+  await $.ui.input({ plugin: 'handoff', key: 'ws-url', text: 'http://handoff.goway.uz', kind: 'change' })
+  await $.ui.input({ plugin: 'handoff', key: 'ws-token', text: 'ho_gw', kind: 'change' })
+  await pane.press({ key: 'ws-save' })
+
+  expect(await pane.find({ type: 'Text', text: /https:\/\// })).toBeDefined()
+  expect(store.workspaces).toEqual(undefined)
+})
+
+test('/clear forgets only the main binding: a background subagent keeps its workspace', { options: OPTIONS }, async ($, on) => {
+  const store: Record<string, unknown> = { workspaces: [GOWAY] }
+  const { clock, log } = workspaceHarness(on, store)
+
+  await $.session.start(START)
+  await clock.advance(10)
+  await $.prompt.submit({ text: 'start', ...IDLE } as never)
+  await $.turn.start({ text: 'start', turnId: 't1' })
+  await $.turn.start({ text: 'sub', turnId: 't2', agentId: 'a1' })
+  const pane = await $.ui.mount(PANE_PROPS as never)
+  await pane.press({ key: 'space-ws-gw' })
+  await clock.advance(10)
+  await $.session.end({ reason: 'clear', sessionId: 'sess-A', resume: { id: 'sess-A' } })
+  log.session = 'sess-B'
+  await $.classic.SessionStart({ source: 'clear', session_id: 'sess-B' })
+  await clock.advance(10)
+  await $.tool.call({ tool: 'mcp__handoff__inbox', agentId: 'a1' } as never)
+  await $.prompt.submit({ text: 'fresh', ...IDLE } as never)
+  await $.turn.start({ text: 'fresh', turnId: 't3' })
+  await $.tool.call({ tool: 'mcp__handoff__inbox' } as never)
+
+  expect(log.calls.filter(call => call.startsWith('MCP'))).toEqual(['MCP handoff.test inbox {}', 'MCP goway.test inbox {}'])
 })

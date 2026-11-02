@@ -1,7 +1,7 @@
 ---
 description: Mark a handoff report my team received as done, with where the work is
 argument-hint: <id> [note]
-allowed-tools: mcp__plugin_handoff_handoff__resolve, mcp__plugin_handoff_handoff__check, mcp__plugin_handoff_handoff__get, Bash(git status:*), Bash(git log:*), Bash(git rev-parse:*), Bash(git branch:*), Bash(gh pr view:*)
+allowed-tools: mcp__handoff__resolve, mcp__handoff__check, mcp__handoff__get, Bash(git status:*), Bash(git log:*), Bash(git rev-parse:*), Bash(git branch:*), Bash(gh pr view:*)
 ---
 
 Finish a handoff report with the handoff `resolve` tool, `status: "done"`. Request: $ARGUMENTS

@@ -86,6 +86,11 @@ export type HandoffEvent = {
   notify: boolean
 }
 
+export type Badge = { waiting: number; unread: number; problem: '' | 'offline' | 'token rejected' }
+export type Place = { id: string; name: string; host: string; isDefault: boolean }
+export type Workspaces = { active: string; claudeOn: string; places: Place[]; badges: Record<string, Badge> }
+export type Manage = { isOpen: boolean; problem: string; isSaving: boolean }
+
 declare module 'claude-code' {
   interface PluginState {
     handoff: {
@@ -98,6 +103,8 @@ declare module 'claude-code' {
       showElsewhere: boolean
       newer: string | null
       lastClosed: number | null
+      workspaces: Workspaces
+      manage: Manage
     }
   }
 }

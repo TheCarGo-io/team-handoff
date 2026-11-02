@@ -1,7 +1,7 @@
 ---
 description: Update a handoff report I sent (fix or extend it after shipping); the receiver is notified
 argument-hint: <id> <what to change>
-allowed-tools: mcp__plugin_handoff_handoff__edit, mcp__plugin_handoff_handoff__get
+allowed-tools: mcp__handoff__edit, mcp__handoff__get
 ---
 
 Edit a handoff report the user sent, with the handoff `edit` tool. Request: $ARGUMENTS

@@ -1,7 +1,7 @@
 ---
 description: Tell the receiver a handoff report I sent can now be worked on (the backend is live, the decision is made)
 argument-hint: <id> [item numbers] [note]
-allowed-tools: mcp__plugin_handoff_handoff__edit, mcp__plugin_handoff_handoff__get
+allowed-tools: mcp__handoff__edit, mcp__handoff__get
 ---
 
 Mark a handoff report the user sent as ready, with the handoff `edit` tool. Request: $ARGUMENTS

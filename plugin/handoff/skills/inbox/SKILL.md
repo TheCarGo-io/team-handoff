@@ -1,6 +1,6 @@
 ---
 description: Show my handoff inbox: replies for me, reports waiting, in progress, overdue, returned
-allowed-tools: mcp__plugin_handoff_handoff__inbox
+allowed-tools: mcp__handoff__inbox
 ---
 
 Call the handoff `inbox` tool with `projects` set to this session's projects.
