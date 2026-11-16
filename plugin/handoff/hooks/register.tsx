@@ -4,9 +4,11 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Badge, Detail, HandoffEvent, Inbox, Manage, Readiness, Row, Thread, View, Workspaces } from '../types'
 import { BUNDLED_INSTRUCTIONS, BUNDLED_TOOLS } from './tools'
 
+const VERSION = '0.6.4'
 const PANE = 'handoffs'
 const WORKSPACES_COMMAND = 'handoff-workspaces'
 const DEFAULT_ID = 'default'
+const MAX_FOLDERS = 200
 const TOOL_PREFIX = 'mcp__handoff__'
 const READ_ONLY = new Set(['inbox', 'board', 'get'])
 const IDLE_ORIGINS = new Set(['composer', 'bridge', 'sdk'])
@@ -104,12 +106,101 @@ export const textOf = (result: Record<string, unknown> | undefined): string =>
     .map(block => block.text ?? '')
     .join('\n')
 
-export const askText = (name: string, args: Record<string, unknown>, workspace: string | undefined): string => {
+export const askText = (name: string, args: Record<string, unknown>, workspace: string | undefined, sessionOn?: string): string => {
   const ids = [args.report_id, ...(Array.isArray(args.report_ids) ? args.report_ids : [])].filter(id => id !== undefined && id !== null)
   const what = ids.length > 0 ? ` #${ids.join(', #')}` : ''
 
-  return `Allow handoff ${name}${what}${workspace ? ` on ${workspace}` : ''}?`
+  return `Allow handoff ${name}${what}${workspace ? ` on ${workspace}` : ''}?${sessionOn ? ` This session is on ${sessionOn}.` : ''}`
 }
+
+const bare = (path: string) => (path.length > 1 ? path.replace(/[/\\]+$/, '') : path)
+const isWithin = (path: string, folder: string) => path === folder || (path.startsWith(folder) && /^[/\\]/.test(path.slice(folder.length)))
+
+export const folderOwner = (folders: Record<string, string>, root: string, isKnownId: (id: string) => boolean): string | undefined =>
+  Object.entries(folders)
+    .filter(([folder, id]) => isKnownId(id) && isWithin(bare(root), folder))
+    .sort((left, right) => right[0].length - left[0].length)[0]?.[1]
+
+export const rememberFolder = (
+  folders: Record<string, string>,
+  root: string,
+  id: string,
+  isKnownId: (id: string) => boolean,
+): Record<string, string> => {
+  const path = bare(root)
+
+  if (path === '') {
+    return folders
+  }
+
+  const rest = Object.fromEntries(Object.entries(folders).filter(([folder]) => folder !== path))
+  const next = folderOwner(rest, path, isKnownId) === id ? rest : { ...rest, [path]: id }
+
+  return Object.fromEntries(Object.entries(next).slice(-MAX_FOLDERS))
+}
+
+export const projectsOnBoard = (text: string): string[] => {
+  try {
+    const rows = JSON.parse(text) as unknown
+
+    if (!Array.isArray(rows)) {
+      return []
+    }
+
+    const names = rows.flatMap((row: { project?: unknown; projects?: unknown }) => [...(Array.isArray(row?.projects) ? row.projects : []), row?.project])
+
+    return [...new Set(names.filter((name): name is string => typeof name === 'string' && name !== ''))]
+  } catch {
+    return []
+  }
+}
+
+export const pickByProjects = (
+  mine: readonly string[],
+  boards: readonly (readonly [string, readonly string[]])[],
+): { id: string; project: string } | undefined => {
+  const wanted = new Set(mine.map(name => name.toLowerCase()))
+  const hits = boards
+    .map(([id, names]) => ({ id, project: names.find(name => wanted.has(name.toLowerCase())) ?? '' }))
+    .filter(hit => hit.project !== '')
+
+  return hits.length === 1 ? hits[0] : undefined
+}
+
+export const spaceNamed = <T extends { name: string; url: string }>(spaces: readonly T[], name: string): T | undefined => {
+  const wanted = name.trim().toLowerCase()
+
+  return spaces.find(space => space.name.toLowerCase() === wanted) ?? spaces.find(space => hostOf(space.url).toLowerCase() === wanted)
+}
+
+export const withWorkspace = (tool: ToolDef, names: readonly string[]): ToolDef => {
+  const schema = tool.inputSchema ?? { type: 'object' }
+  const properties = (schema.properties ?? {}) as Record<string, unknown>
+
+  if (names.length < 2 || 'workspace' in properties) {
+    return tool
+  }
+
+  const workspace = {
+    type: 'string',
+    description:
+      `Handoff workspace (team server) to act on: ${names.join(', ')}. Leave it out to act on this conversation's workspace. ` +
+      'Report numbers, teams and projects belong to one workspace.',
+  }
+
+  return { ...tool, inputSchema: { ...schema, type: 'object', properties: { ...properties, workspace } } }
+}
+
+export const teamsOf = (instructions: string): string => /Teams \(([^)]+)\)/.exec(instructions)?.[1] ?? ''
+
+export const othersNote = (others: readonly { name: string; teams: string }[]): string =>
+  others.length === 0
+    ? ''
+    : `Other handoff workspaces on this machine: ${others.map(other => (other.teams === '' ? other.name : `${other.name} (teams ${other.teams})`)).join('; ')}. ` +
+      'To act on one without switching, pass workspace: "<name>" to the mcp__handoff__* tool; its report numbers, teams and projects are its own. ' +
+      "Use another workspace only when the user names it or the work belongs to that workspace's projects."
+
+export const shortPath = (path: string): string => path.replace(/^(\/Users|\/home)\/[^/]+(?=\/|$)/, '~')
 
 export const transportProblem = (url: string): string | undefined => {
   const host = hostOf(url).replace(/:\d+$/, '')
@@ -289,7 +380,7 @@ export const projectsOf = (remote: string, children: string, cwd: string): strin
 const WORKSPACE_SCAN =
   'for d in */; do [ -e "$d.git" ] && { git -C "$d" remote get-url origin 2>/dev/null || echo "$d"; }; done'
 
-export const describeContext = (box: Inbox, workspace?: string): string => {
+export const describeContext = (box: Inbox, workspace?: string, others: readonly string[] = []): string => {
   const mine = (row: Row) => (row.projects ?? [row.project]).some(name => box.projects.includes(name))
   const brief = (row: Row) => `#${row.id} "${row.title}" (${(row.projects ?? [row.project]).join(', ')})`
   const waiting = box.rows.filter(row => row.status === 'sent')
@@ -298,6 +389,7 @@ export const describeContext = (box: Inbox, workspace?: string): string => {
   const lines = [
     'Handoff context from the plugin, current as of this prompt (use it instead of looking these up):',
     ...(workspace === undefined ? [] : [`- handoff workspace: ${workspace} (the mcp__handoff__* tools act on it)`]),
+    ...(others.length === 0 ? [] : [`- other handoff workspaces: ${others.join(', ')} (pass workspace: "<name>" to act on one; the lines below are ${workspace}'s)`]),
     `- user ${box.user}, team ${box.team}`,
     `- this session's ${box.projects.length === 1 ? 'project' : 'projects (a workspace of repositories)'}: ${box.projects.join(', ')}`,
     `- waiting for these projects: ${waiting.filter(mine).map(brief).join('; ') || 'none'}`,
@@ -381,6 +473,9 @@ let activeId = DEFAULT_ID
 let pendingMain: string | undefined
 let schemas = new Map<string, string[]>()
 let registered = ''
+let serverTools: ToolDef[] = []
+let folders: Record<string, string> = {}
+let root = ''
 let draft = { name: '', url: '', token: '' }
 let badgeTimer: { cancel: () => void } | undefined
 const binding = new Map<string, string>()
@@ -438,7 +533,15 @@ const showPlaces = async ($: EngineInterface) => {
     ...shown,
     active: activeId,
     claudeOn: binding.get('main') ?? activeId,
-    places: [fallback, ...extras].map(space => ({ id: space.id, name: space.name, host: hostOf(space.url), isDefault: space.id === DEFAULT_ID })),
+    places: [fallback, ...extras].map(space => ({
+      id: space.id,
+      name: space.name,
+      host: hostOf(space.url),
+      isDefault: space.id === DEFAULT_ID,
+      folders: Object.entries(folders)
+        .filter(([, owner]) => owner === space.id)
+        .map(([folder]) => shortPath(folder)),
+    })),
   }))
 }
 
@@ -447,21 +550,61 @@ const loadExtras = async ($: EngineInterface) => {
   extras = Array.isArray(stored) ? stored.filter(isWorkspace).slice(0, 20) : []
 }
 
-const restoreActive = async ($: EngineInterface) => {
-  const fromState = (await read($, spaces)).active
-  const fromStore = String((await $.store.get('active').catch(() => '')) ?? '')
-  activeId = [fromState, activeId, fromStore].find(isKnown) ?? DEFAULT_ID
+const loadFolders = async ($: EngineInterface) => {
+  const stored = await $.store.get('folders').catch(() => undefined)
+  const entries = stored !== null && typeof stored === 'object' && !Array.isArray(stored) ? Object.entries(stored as Record<string, unknown>) : []
+  folders = Object.fromEntries(entries.filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
+}
+
+const keepFolder = async ($: EngineInterface, id: string) => {
+  if (root === '') {
+    return
+  }
+
+  await loadFolders($)
+  folders = rememberFolder(folders, root, id, isKnown)
+  await $.store.set('folders', folders).catch(() => undefined)
+}
+
+const restoreActive = async ($: EngineInterface): Promise<boolean> => {
+  const kept = (await read($, spaces)).active
+  const owner = folderOwner(folders, root, isKnown)
+  activeId = isKnown(kept) ? kept : (owner ?? DEFAULT_ID)
   await showPlaces($)
+
+  return isKnown(kept) || owner !== undefined
 }
 
 const registerTools = async ($: EngineInterface, tools: ToolDef[]) => {
-  registered = JSON.stringify(tools)
+  const names = [fallback, ...extras].map(space => space.name)
+  const shaped = JSON.stringify([tools, names])
+  serverTools = tools
   schemas = new Map(tools.map(tool => [tool.name, Object.keys((tool.inputSchema?.properties as object | undefined) ?? {})]))
 
-  for (const tool of tools) {
+  if (shaped === registered) {
+    return
+  }
+
+  registered = shaped
+
+  for (const tool of tools.map(one => withWorkspace(one, names))) {
     await $.tool
       .register({ name: tool.name, description: tool.description ?? '', inputSchema: tool.inputSchema ?? { type: 'object' } })
       .catch(() => undefined)
+  }
+}
+
+const learn = async ($: EngineInterface, space: Workspace) => {
+  if (configProblem(space.url, space.token) !== undefined) {
+    return
+  }
+
+  const hello = await rpc($, targetOf(space), 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'handoff', version: VERSION } }, SERVER_TIMEOUT_MS)
+  const text = String(hello.result?.instructions ?? '')
+
+  if (text !== '' && instructions.get(space.id) !== text) {
+    instructions.set(space.id, text)
+    await $.store.set('instructions', Object.fromEntries(instructions)).catch(() => undefined)
   }
 }
 
@@ -470,26 +613,65 @@ const refreshServer = async ($: EngineInterface, space: Workspace) => {
     return
   }
 
-  const target = targetOf(space)
-  const hello = await rpc($, target, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'handoff', version: '0.6.3' } }, SERVER_TIMEOUT_MS)
-  const text = String(hello.result?.instructions ?? '')
-
-  if (text !== '' && instructions.get(space.id) !== text) {
-    instructions.set(space.id, text)
-    await $.store.set('instructions', Object.fromEntries(instructions)).catch(() => undefined)
-  }
-
-  const listed = await rpc($, target, 'tools/list', {}, SERVER_TIMEOUT_MS)
+  await learn($, space)
+  const listed = await rpc($, targetOf(space), 'tools/list', {}, SERVER_TIMEOUT_MS)
   const tools = (listed.result?.tools ?? []) as ToolDef[]
 
   if (!Array.isArray(tools) || tools.length === 0) {
     return
   }
 
-  if (JSON.stringify(tools) !== registered) {
+  if (JSON.stringify(tools) !== JSON.stringify(serverTools)) {
     await $.store.set('tools', tools).catch(() => undefined)
     await registerTools($, tools)
   }
+}
+
+const projectsAt = async ($: EngineInterface, cwd: string): Promise<string[]> => {
+  const remote = await $.process.run(['git', 'remote', 'get-url', 'origin'], { cwd }).catch(() => ({ stdout: '' }))
+  const children = remote.stdout.trim() === '' ? await $.process.run(['sh', '-c', WORKSPACE_SCAN], { cwd }).catch(() => ({ stdout: '' })) : { stdout: '' }
+
+  return projectsOf(remote.stdout, children.stdout, cwd)
+}
+
+const findWorkspace = async ($: EngineInterface) => {
+  const startedOn = activeId
+  const at = root
+  const mine = await projectsAt($, at)
+  const boards = await Promise.all(
+    [fallback, ...extras]
+      .filter(space => configProblem(space.url, space.token) === undefined)
+      .map(async space => {
+        const answer = await fetchWithin($, `${space.url}/api/v1/board?archived=true`, { headers: targetOf(space).headers }, SERVER_TIMEOUT_MS * 2)
+
+        return answer?.ok === true ? ([space.id, projectsOnBoard(answer.text)] as const) : undefined
+      }),
+  )
+
+  if (boards.some(board => board === undefined) || activeId !== startedOn || root !== at) {
+    return
+  }
+
+  const found = pickByProjects(mine, boards as (readonly [string, string[]])[])
+
+  if (found === undefined) {
+    return
+  }
+
+  await keepFolder($, found.id)
+
+  if (found.id === activeId) {
+    await showPlaces($)
+
+    return
+  }
+
+  const name = workspaceOf(found.id).name
+  await switchTo($, found.id, `Handoff: now on ${name}, since ${found.project} is on its board. ${shortPath(at)} will open on ${name}; w in the pane changes it.`)
+}
+
+const learnOthers = async ($: EngineInterface) => {
+  await Promise.all([fallback, ...extras].filter(space => space.id !== activeId).map(space => learn($, space).catch(() => undefined)))
 }
 
 const pollBadges = async ($: EngineInterface) => {
@@ -523,14 +705,23 @@ const pollBadges = async ($: EngineInterface) => {
   await update($, spaces, shown => ({ ...shown, badges: Object.fromEntries(found) }))
 }
 
-const switchTo = async ($: EngineInterface, id: string) => {
-  if (id === activeId || !isKnown(id)) {
+const switchTo = async ($: EngineInterface, id: string, note?: string) => {
+  if (!isKnown(id)) {
+    return
+  }
+
+  if (note === undefined) {
+    await keepFolder($, id)
+  }
+
+  if (id === activeId) {
+    await showPlaces($)
+
     return
   }
 
   activeId = id
   const space = workspaceOf(id)
-  await $.store.set('active', id).catch(() => undefined)
   await update($, view, () => LIST)
   await update($, confirming, () => null)
   await update($, selected, () => [])
@@ -543,7 +734,8 @@ const switchTo = async ($: EngineInterface, id: string) => {
   connection = connect($, currentSetup(), await $.session.cwd().catch(() => ''), session)
   void refreshServer($, space).catch(() => undefined)
   void pollBadges($).catch(() => undefined)
-  $.ui.toast(`Handoff: now on ${space.name}`, { timeoutMs: 5000 })
+  const remembered = root === '' ? '' : ` ${shortPath(root)} will open on it.`
+  $.ui.toast(note ?? `Handoff: now on ${space.name}.${remembered}`, { timeoutMs: note === undefined ? 5000 : 8000 })
 }
 
 const openPane = async ($: EngineInterface) => {
@@ -591,7 +783,8 @@ const pressSave = async ($: EngineInterface) => {
   draft = { name: '', url: '', token: '' }
   await update($, manage, () => ({ ...CLOSED_FORM, isOpen: true }))
   await showPlaces($)
-  void refreshServer($, space).catch(() => undefined)
+  await registerTools($, serverTools)
+  void learn($, space).catch(() => undefined)
   void pollBadges($).catch(() => undefined)
   $.ui.toast(`Handoff: added ${name}. Press w in the pane to switch.`, { timeoutMs: 6000 })
 }
@@ -602,7 +795,7 @@ const pressRemove = async ($: EngineInterface, id: string) => {
   }
 
   if (id === activeId) {
-    await switchTo($, DEFAULT_ID)
+    await switchTo($, DEFAULT_ID, `Handoff: now on ${fallback.name}.`)
   }
 
   await loadExtras($)
@@ -610,8 +803,12 @@ const pressRemove = async ($: EngineInterface, id: string) => {
   await $.store.set('workspaces', extras).catch(() => undefined)
   instructions.delete(id)
   await $.store.set('instructions', Object.fromEntries(instructions)).catch(() => undefined)
+  await loadFolders($)
+  folders = Object.fromEntries(Object.entries(folders).filter(([, owner]) => owner !== id))
+  await $.store.set('folders', folders).catch(() => undefined)
   await update($, spaces, shown => ({ ...shown, badges: Object.fromEntries(Object.entries(shown.badges).filter(([key]) => key !== id)) }))
   await showPlaces($)
+  await registerTools($, serverTools)
 }
 
 const readReport = async ($: EngineInterface, id: number) => {
@@ -833,13 +1030,9 @@ const connect = ($: EngineInterface, setup: Setup, startedIn: string, session: s
     const cwd = await $.session.cwd().catch(() => startedIn)
 
     if (cwd !== locatedIn) {
-      const remote = await $.process.run(['git', 'remote', 'get-url', 'origin'], { cwd }).catch(() => ({ stdout: '' }))
-      const children =
-        remote.stdout.trim() === ''
-          ? await $.process.run(['sh', '-c', WORKSPACE_SCAN], { cwd }).catch(() => ({ stdout: '' }))
-          : { stdout: '' }
+      const found = await projectsAt($, cwd)
       locatedIn = cwd
-      projects = projectsOf(remote.stdout, children.stdout, cwd)
+      projects = found
       project = projects.length === 1 ? (projects[0] ?? '') : projectOf('', cwd)
     }
   }
@@ -1062,8 +1255,10 @@ export const register: Register = (on, options) => {
 
     await $.command.register({ name: PANE, description: 'Show my team handoff inbox in a pane (no model call)' })
     await $.command.register({ name: WORKSPACES_COMMAND, description: 'Add, switch or remove handoff workspaces (no model call)' })
+    root = bare(((await $.session.root().catch(() => '')) as string | undefined) || e.cwd || '')
     await loadExtras($)
-    await restoreActive($)
+    await loadFolders($)
+    const isSettled = await restoreActive($)
     const saved = await $.store.get('instructions').catch(() => undefined)
 
     for (const [id, text] of Object.entries((saved ?? {}) as Record<string, unknown>)) {
@@ -1094,6 +1289,14 @@ export const register: Register = (on, options) => {
     badgeTimer?.cancel()
     badgeTimer = $.clock.every(BADGE_MS, () => void pollBadges($).catch(() => undefined))
     void pollBadges($).catch(() => undefined)
+
+    if (extras.length > 0) {
+      void learnOthers($).catch(() => undefined)
+    }
+
+    if (!isSettled && extras.length > 0) {
+      void findWorkspace($).catch(() => undefined)
+    }
 
     return started
   })
@@ -1144,9 +1347,22 @@ export const register: Register = (on, options) => {
 
   on('tool.call', { tool: /^mcp__handoff__/ }, async ($, e) => {
     const name = e.tool.slice(TOOL_PREFIX.length)
-    const space = workspaceOf(boundTo(e.agentId))
+    const raw = e as unknown as Record<string, unknown>
+    const keys = schemas.get(name) ?? []
+    const bound = workspaceOf(boundTo(e.agentId))
+    const asked = keys.includes('workspace') ? undefined : raw.workspace
+    const all = [fallback, ...extras]
+    const space = typeof asked === 'string' && asked.trim() !== '' ? spaceNamed(all, asked) : bound
+
+    if (space === undefined) {
+      return {
+        deny: `No handoff workspace is named "${printable(String(asked)).slice(0, 40)}". Use one of: ${all.map(one => one.name).join(', ')}, or leave workspace out for ${bound.name}.`,
+      }
+    }
+
+    const isOther = space.id !== bound.id
     const target = targetOf(space)
-    const args = argsOf(e as unknown as Record<string, unknown>, schemas.get(name) ?? [])
+    const args = argsOf(raw, keys)
 
     if (!READ_ONLY.has(name)) {
       const verdict = await $.tool.check({ tool: e.tool, input: args } as never).catch(() => ({ decision: 'deny' as const, reason: undefined }))
@@ -1155,9 +1371,9 @@ export const register: Register = (on, options) => {
         return { deny: verdict.reason ?? `Your permission rules deny handoff ${name}.` }
       }
 
-      if (verdict.decision !== 'allow') {
+      if (verdict.decision !== 'allow' || isOther) {
         const answer = await $.ui
-          .ask(askText(name, args, extras.length > 0 ? space.name : undefined), ['Allow once', 'Deny'])
+          .ask(askText(name, args, extras.length > 0 ? space.name : undefined, isOther ? bound.name : undefined), ['Allow once', 'Deny'])
           .catch(() => 'Deny')
 
         if (answer !== 'Allow once') {
@@ -1178,7 +1394,7 @@ export const register: Register = (on, options) => {
       return { deny: text || `Handoff ${name} failed.` }
     }
 
-    const taken = name === 'take' ? /"id":\s*(\d+)/.exec(text)?.[1] : undefined
+    const taken = name === 'take' && !isOther ? /"id":\s*(\d+)/.exec(text)?.[1] : undefined
 
     if (taken !== undefined) {
       void placeHere($, target, taken).catch(() => undefined)
@@ -1191,7 +1407,8 @@ export const register: Register = (on, options) => {
     const composed = await next(e)
     const space = workspaceOf(binding.get('main') ?? activeId)
     const text = instructions.get(space.id) ?? BUNDLED_INSTRUCTIONS
-    const where = extras.length > 0 ? `Handoff workspace of the main conversation: ${space.name}. ` : ''
+    const others = [fallback, ...extras].filter(one => one.id !== space.id).map(one => ({ name: one.name, teams: teamsOf(instructions.get(one.id) ?? '') }))
+    const where = extras.length > 0 ? `Handoff workspace of the main conversation: ${space.name}. ${othersNote(others)}\n` : ''
 
     return {
       sections: [
@@ -1218,7 +1435,13 @@ export const register: Register = (on, options) => {
     const isSame = (isIdle ? activeId : (was ?? activeId)) === activeId
 
     if (e.text.trimStart().startsWith('/handoff:') && box.isLoaded && isSame) {
-      context.push(describeContext(box, extras.length > 0 ? workspaceOf(activeId).name : undefined))
+      context.push(
+        describeContext(
+          box,
+          extras.length > 0 ? workspaceOf(activeId).name : undefined,
+          [fallback, ...extras].filter(one => one.id !== activeId).map(one => one.name),
+        ),
+      )
     }
 
     return context.length === (e.context ?? []).length ? next(e) : next({ ...e, context })
@@ -1381,24 +1604,36 @@ export const register: Register = (on, options) => {
             <Button key="manage-back" label="← Back" hotkey="b" dimColor onPress={() => void update($, manage, () => CLOSED_FORM)} />
             <Text bold>Handoff workspaces</Text>
           </Box>
-          <Text dimColor>A workspace is a whole team server. The tools, the pane and the band follow the one you pick.</Text>
+          <Text dimColor>
+            A workspace is a whole team server. Each folder opens on the one you last used in it; Claude reaches the others by name.
+          </Text>
           <Box flexDirection="column" marginTop={1}>
             {where.places.map(place => (
-              <Box key={`place-${place.id}`} gap={1}>
-                <Box width={2} flexShrink={0}>
-                  <Text color="success">{place.id === where.active ? '●' : ' '}</Text>
+              <Box key={`place-${place.id}`} flexDirection="column">
+                <Box gap={1}>
+                  <Box width={2} flexShrink={0}>
+                    <Text color="success">{place.id === where.active ? '●' : ' '}</Text>
+                  </Box>
+                  <Box width={16} flexShrink={0}>
+                    <Text bold={place.id === where.active}>{clip(printable(place.name), 16)}</Text>
+                  </Box>
+                  <Box flexGrow={1} flexShrink={1}>
+                    <Text dimColor wrap="truncate-end">
+                      {printable(place.host)}
+                      {place.isDefault ? ' · from /plugin' : ''}
+                    </Text>
+                  </Box>
+                  {place.id !== where.active && <Button key={`use-${place.id}`} label="Use" onPress={() => void switchTo($, place.id)} />}
+                  {!place.isDefault && <Button key={`remove-${place.id}`} label="Remove" dimColor onPress={() => void pressRemove($, place.id)} />}
                 </Box>
-                <Box width={16} flexShrink={0}>
-                  <Text bold={place.id === where.active}>{clip(printable(place.name), 16)}</Text>
-                </Box>
-                <Box flexGrow={1} flexShrink={1}>
-                  <Text dimColor wrap="truncate-end">
-                    {printable(place.host)}
-                    {place.isDefault ? ' · from /plugin' : ''}
-                  </Text>
-                </Box>
-                {place.id !== where.active && <Button key={`use-${place.id}`} label="Use" onPress={() => void switchTo($, place.id)} />}
-                {!place.isDefault && <Button key={`remove-${place.id}`} label="Remove" dimColor onPress={() => void pressRemove($, place.id)} />}
+                {place.folders.length > 0 && (
+                  <Box key={`folders-${place.id}`} paddingLeft={3}>
+                    <Text dimColor wrap="truncate-end">
+                      opens in {printable(place.folders.slice(0, 3).join(', '))}
+                      {place.folders.length > 3 ? ` +${place.folders.length - 3}` : ''}
+                    </Text>
+                  </Box>
+                )}
               </Box>
             ))}
           </Box>

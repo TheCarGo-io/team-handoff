@@ -125,7 +125,7 @@ tries again after 15 and 30 seconds, then every minute; `[ Retry ]` tries at onc
 | `/handoff:return <id> <what to change>` | Hands it back to the sender as needs-changes |
 | `/handoff:edit <id> <change>` | Updates a report I sent; the receiver is notified |
 | `/handoff:withdraw <id>` | Deletes a report I sent, for everyone |
-| `/handoff-workspaces` | Lists the handoff servers this machine knows, adds one (name, URL, token) or removes one. The pane's switcher (`w`) moves between them |
+| `/handoff-workspaces` | Lists the handoff servers this machine knows and the folders that open on each, adds one (name, URL, token) or removes one. The pane's switcher (`w`) moves between them |
 | `/handoffs` | Opens the inbox in a side pane: click a title to read the report in full (text and replies), Take, Continue, Fix, Reply, Done, close (press twice, no model call). Tick `[ ]` on several rows and press "Take N selected" to take them together. `hide` removes a report from your own list and counts only (it stays where it is for everyone else, and sits under "hidden from your list"); Close ends it for everyone, is not offered on a report a teammate holds, and can be undone from the pane or with `/handoff:reopen`. Listing and reading cost no tokens and do not take the report |
 
 Notifications cost no tokens: the plugin holds one `curl` stream to `/api/v1/events` per interactive session
@@ -176,7 +176,21 @@ reports, ● for unread replies); `w` or a click switches. A switch is per sessi
 prompt and the event stream move at once, Claude's tools move with your next message, which also tells Claude
 that report numbers from earlier in the conversation belong to the other workspace. Until then the line says
 `Claude is still on TheCargo until your next message`. A subagent keeps the workspace of the turn that started
-it. New sessions start on the workspace you switched to last; `/clear` and `/reload-plugins` keep it.
+it. `/clear` and `/reload-plugins` keep the session's workspace.
+
+Each folder remembers its workspace. A switch (or `Use` in `/handoff-workspaces`) is remembered for the
+session's project folder and every folder under it, so a new session there opens on that workspace; the longest
+remembered folder wins, and sessions in other folders are not moved. A folder nothing is remembered for is
+looked up once: the plugin reads each workspace's board (`/api/v1/board?archived=true`) and, when the session's
+repositories appear on exactly one of them, opens there and remembers it. On two boards, on none, or when a
+server does not answer, the session stays on the first workspace and nothing is remembered. The manager lists
+the folders under each workspace. Two sessions in different folders run on their own workspaces at the same
+time.
+
+With more than one workspace, every `mcp__handoff__*` tool also takes `workspace` (a workspace name, or its
+host) and acts on that server without switching anything. The prompt tells Claude the other workspaces and
+their teams. A write to another workspace than the session's always asks, even when a permission rule allows the
+tool, and a take there is not placed in this session.
 
 ## Plugin development
 

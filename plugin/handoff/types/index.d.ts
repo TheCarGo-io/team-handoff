@@ -87,7 +87,7 @@ export type HandoffEvent = {
 }
 
 export type Badge = { waiting: number; unread: number; problem: '' | 'offline' | 'token rejected' }
-export type Place = { id: string; name: string; host: string; isDefault: boolean }
+export type Place = { id: string; name: string; host: string; isDefault: boolean; folders: string[] }
 export type Workspaces = { active: string; claudeOn: string; places: Place[]; badges: Record<string, Badge> }
 export type Manage = { isOpen: boolean; problem: string; isSaving: boolean }
 

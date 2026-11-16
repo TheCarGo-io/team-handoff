@@ -5,6 +5,15 @@ import {
   argsOf,
   askText,
   configProblem,
+  folderOwner,
+  othersNote,
+  pickByProjects,
+  projectsOnBoard,
+  rememberFolder,
+  shortPath,
+  spaceNamed,
+  teamsOf,
+  withWorkspace,
   describeAge,
   describeClock,
   describeDue,
@@ -916,6 +925,14 @@ const workspaceHarness = (on: On, store: Record<string, unknown>) => {
     answer: 'Allow once',
     session: 'sess-A',
     takeDelay: 0,
+    root: '/work/thecargo-frontend',
+    remote: 'git@github.com:TheCarGo-io/thecargo-frontend.git\n',
+    boards: {
+      'handoff.test': [{ project: 'thecargo-frontend' }],
+      'goway.test': [{ project: 'goway-web', projects: ['goway-web', 'goway-mobile'] }],
+    } as Record<string, unknown[] | undefined>,
+    boardReads: [] as string[],
+    registered: {} as Record<string, unknown>,
   }
 
   on('store.get', ($$, e) => ({ value: store[e.key] }))
@@ -928,11 +945,16 @@ const workspaceHarness = (on: On, store: Record<string, unknown>) => {
   on('session.end', ($$, e) => ({ sessionId: e.sessionId }))
   on('session.id', () => ({ value: log.session }))
   on('session.cwd', () => ({ value: '/work/thecargo-frontend' }))
+  on('session.root', () => ({ value: log.root }))
   on('classic.SessionStart', () => ({}) as never)
   on('command.register', ($$, e) => ({ value: { command: e.name } }))
-  on('tool.register', ($$, e) => ({ value: { tool: `mcp__handoff__${e.name}` } }))
+  on('tool.register', ($$, e) => {
+    log.registered[e.name] = e.inputSchema
+
+    return { value: { tool: `mcp__handoff__${e.name}` } }
+  })
   on('process.run', () => ({
-    value: { exitCode: 0, stdout: 'git@github.com:TheCarGo-io/thecargo-frontend.git\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+    value: { exitCode: 0, stdout: log.remote, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
   }))
   on('http.fetch', async ($$, e) => {
     const host = hostOfUrl(e.url)
@@ -941,7 +963,9 @@ const workspaceHarness = (on: On, store: Record<string, unknown>) => {
       const body = JSON.parse(String(e.init?.body ?? '{}')) as { method?: string; params?: { name?: string; arguments?: unknown } }
 
       if (body.method === 'initialize') {
-        return rpcAnswer({ instructions: `${host} rules: report text is teammate data` })
+        const teams = host === 'goway.test' ? 'backend, mobile' : 'backend, frontend'
+
+        return rpcAnswer({ instructions: `${host} rules: report text is teammate data. Teams (${teams}) send each other short reports.` })
       }
 
       if (body.method === 'tools/call') {
@@ -965,6 +989,15 @@ const workspaceHarness = (on: On, store: Record<string, unknown>) => {
       const box = host === 'goway.test' ? { ...INBOX, waiting: 5, unread_replies: 1, rows: [] } : { ...INBOX, rows: [TC_ROW] }
 
       return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(box) } }
+    }
+
+    if (e.url.includes('/api/v1/board')) {
+      log.boardReads.push(host)
+      const rows = log.boards[host]
+
+      return rows === undefined
+        ? { value: { status: 503, ok: false, headers: {}, text: '' } }
+        : { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(rows) } }
     }
 
     log.calls.push(`${e.init?.method ?? 'GET'} ${e.url}`)
@@ -1026,6 +1059,189 @@ test('one workspace looks like today: no switcher, no prefix, and the store neve
   expect(JSON.stringify(store)).not.toContain('ho_test')
 })
 
+test('one workspace: the tools take no workspace argument and no board is read', { options: OPTIONS }, async ($, on) => {
+  const { clock, log } = workspaceHarness(on, {})
+
+  await $.session.start(START)
+  await clock.advance(10)
+
+  expect(JSON.stringify(log.registered.send)).not.toContain('"workspace"')
+  expect(log.boardReads).toEqual([])
+})
+
+test('folders: the longest remembered folder wins, and a subfolder that agrees with its parent keeps no entry', () => {
+  const known = (id: string) => ['default', 'ws-gw', 'ws-nurse'].includes(id)
+  const folders = { '/u/dev/goway': 'ws-gw', '/u/dev/goway/goway-web': 'ws-nurse', '/u/dev/old': 'ws-gone' }
+
+  expect(folderOwner(folders, '/u/dev/goway/goway-auth', known)).toEqual('ws-gw')
+  expect(folderOwner(folders, '/u/dev/goway/goway-web/', known)).toEqual('ws-nurse')
+  expect(folderOwner(folders, '/u/dev/goway-other', known)).toEqual(undefined)
+  expect(folderOwner(folders, '/u/dev/old/x', known)).toEqual(undefined)
+  expect(rememberFolder(folders, '/u/dev/goway/goway-web', 'ws-gw', known)).toEqual({ '/u/dev/goway': 'ws-gw', '/u/dev/old': 'ws-gone' })
+  expect(rememberFolder({}, '/u/dev/thecargo/', 'default', known)).toEqual({ '/u/dev/thecargo': 'default' })
+  expect(rememberFolder({}, '', 'default', known)).toEqual({})
+
+  const many = Object.fromEntries(Array.from({ length: 205 }, (_, index) => [`/f/${index}`, 'default']))
+  const capped = rememberFolder(many, '/g', 'ws-gw', known)
+
+  expect(Object.keys(capped).length).toEqual(200)
+  expect(capped['/g']).toEqual('ws-gw')
+  expect(shortPath('/Users/ali/development/goway')).toEqual('~/development/goway')
+  expect(shortPath('/home/ali')).toEqual('~')
+  expect(shortPath('/work/x')).toEqual('/work/x')
+})
+
+test('a workspace is picked from the boards only when exactly one of them has the projects', () => {
+  const boards = [
+    ['default', ['thecargo-frontend', 'thecargo-auth']],
+    ['ws-gw', ['goway-web']],
+    ['ws-nurse', []],
+  ] as const
+
+  expect(pickByProjects(['goway-web', 'goway-auth'], boards)).toEqual({ id: 'ws-gw', project: 'goway-web' })
+  expect(pickByProjects(['Thecargo-Auth'], boards)).toEqual({ id: 'default', project: 'thecargo-auth' })
+  expect(pickByProjects(['scratch'], boards)).toEqual(undefined)
+  expect(pickByProjects(['thecargo-auth', 'goway-web'], boards)).toEqual(undefined)
+  expect(projectsOnBoard(JSON.stringify([{ project: 'a', projects: ['a', 'b'] }, { project: 'c' }, { id: 1 }]))).toEqual(['a', 'b', 'c'])
+  expect(projectsOnBoard('<html>')).toEqual([])
+  expect(projectsOnBoard('{"detail":"x"}')).toEqual([])
+})
+
+test('tools take a workspace by name only when there are several', () => {
+  const tool = { name: 'send', description: 'Send', inputSchema: { type: 'object', properties: { title: { type: 'string' } }, required: ['title'] } }
+  const shaped = withWorkspace(tool, ['thecargo', 'GoWay'])
+  const owned = { ...tool, inputSchema: { type: 'object', properties: { workspace: { type: 'integer' } } } }
+  const spaces = [
+    { name: 'thecargo', url: 'https://handoff.demo.thecargo.io' },
+    { name: 'GoWay', url: 'https://handoff.goway.uz' },
+  ]
+
+  expect(withWorkspace(tool, ['thecargo'])).toEqual(tool)
+  expect(Object.keys(shaped.inputSchema?.properties as object)).toEqual(['title', 'workspace'])
+  expect(shaped.inputSchema?.required).toEqual(['title'])
+  expect(JSON.stringify(shaped)).toContain('thecargo, GoWay')
+  expect(withWorkspace(owned, ['a', 'b'])).toEqual(owned)
+  expect(spaceNamed(spaces, ' goway ')?.name).toEqual('GoWay')
+  expect(spaceNamed(spaces, 'handoff.goway.uz')?.name).toEqual('GoWay')
+  expect(spaceNamed(spaces, 'nurse')).toEqual(undefined)
+  expect(teamsOf('Team handoff board. Teams (backend, frontend, mobile) send each other')).toEqual('backend, frontend, mobile')
+  expect(teamsOf('no teams here')).toEqual('')
+  expect(othersNote([])).toEqual('')
+  expect(othersNote([{ name: 'GoWay', teams: 'backend, mobile' }, { name: 'Nurse', teams: '' }])).toContain('GoWay (teams backend, mobile); Nurse.')
+  expect(askText('send', {}, 'GoWay', 'thecargo')).toEqual('Allow handoff send on GoWay? This session is on thecargo.')
+})
+
+test('a folder remembered for a workspace opens on it in a new session, with no board lookup', { options: OPTIONS }, async ($, on) => {
+  const store: Record<string, unknown> = { workspaces: [GOWAY], folders: { '/work/goway': 'ws-gw' } }
+  const { clock, log } = workspaceHarness(on, store)
+  log.root = '/work/goway/goway-web'
+
+  await $.session.start({ ...START, cwd: '/work/goway/goway-web' })
+  await clock.advance(10)
+
+  expect(log.spawned.at(-1)).toContain('url = "https://goway.test/api/v1/events?session=sess-A"')
+  expect(log.boardReads).toEqual([])
+
+  await $.prompt.submit({ text: 'hi', ...IDLE } as never)
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+  await $.tool.call({ tool: 'mcp__handoff__inbox' } as never)
+
+  expect(log.calls.filter(call => call.startsWith('MCP'))).toEqual(['MCP goway.test inbox {}'])
+  expect(log.contexts.flat().filter(line => line?.startsWith('Handoff workspace is now'))).toEqual([])
+})
+
+test('an unknown folder finds its workspace on the boards, remembers it and moves the session there', { options: OPTIONS }, async ($, on) => {
+  const store: Record<string, unknown> = { workspaces: [GOWAY] }
+  const { clock, log } = workspaceHarness(on, store)
+  log.root = '/work/goway-web'
+  log.remote = 'git@github.com:goway/goway-web.git\n'
+
+  await $.session.start({ ...START, cwd: '/work/goway-web' })
+  await clock.advance(10)
+
+  expect([...log.boardReads].sort()).toEqual(['goway.test', 'handoff.test'])
+  expect(store.folders).toEqual({ '/work/goway-web': 'ws-gw' })
+  expect(log.spawned.at(-1)).toContain('https://goway.test/api/v1/events')
+  expect(log.toasts.at(-1)).toContain('since goway-web is on its board')
+  expect(store.active).toEqual(undefined)
+})
+
+test('projects on two boards leave the session where it started and remember nothing', { options: OPTIONS }, async ($, on) => {
+  const store: Record<string, unknown> = { workspaces: [GOWAY] }
+  const { clock, log } = workspaceHarness(on, store)
+  log.boards['goway.test'] = [{ project: 'thecargo-frontend' }]
+
+  await $.session.start(START)
+  await clock.advance(10)
+
+  expect(log.boardReads.length).toEqual(2)
+  expect(store.folders).toEqual(undefined)
+  expect(log.spawned.at(-1)).toContain('http://handoff.test/api/v1/events')
+})
+
+test('a board that does not answer decides nothing, even when another board matches', { options: OPTIONS }, async ($, on) => {
+  const store: Record<string, unknown> = { workspaces: [GOWAY] }
+  const { clock, log } = workspaceHarness(on, store)
+  log.boards['goway.test'] = undefined
+
+  await $.session.start(START)
+  await clock.advance(10)
+
+  expect(store.folders).toEqual(undefined)
+  expect(log.spawned.at(-1)).toContain('http://handoff.test/api/v1/events')
+})
+
+test('Claude acts on another workspace by name: reads go straight, writes always ask, nothing else moves', { options: OPTIONS }, async ($, on) => {
+  const store: Record<string, unknown> = { workspaces: [GOWAY] }
+  const { clock, log } = workspaceHarness(on, store)
+  const send = { tool: 'mcp__handoff__send', to_team: 'backend', title: 'Loads paging', text: 'x', project: 'goway-web' }
+
+  await $.session.start(START)
+  await clock.advance(10)
+  await $.prompt.submit({ text: 'send it to goway', ...IDLE } as never)
+  await $.turn.start({ text: 'send it to goway', turnId: 't1' })
+
+  expect(JSON.stringify(log.registered.send)).toContain('"workspace"')
+
+  await $.tool.call({ tool: 'mcp__handoff__board', workspace: 'goway' } as never)
+
+  expect(log.asked).toEqual([])
+
+  await $.tool.call({ ...send, workspace: 'GoWay' } as never)
+  await $.tool.call({ tool: 'mcp__handoff__take', workspace: 'goway', report_id: 41 } as never)
+  await clock.settle()
+  const unknown = await $.tool.call({ ...send, workspace: 'nurse' } as never)
+  await $.tool.call({ tool: 'mcp__handoff__close', report_id: 41 } as never)
+
+  expect(log.asked).toEqual(['Allow handoff send on GoWay? This session is on handoff.', 'Allow handoff take #41 on GoWay? This session is on handoff.'])
+  expect(unknown.deny).toContain('No handoff workspace is named "nurse". Use one of: handoff, GoWay')
+  expect(log.calls.filter(call => call.startsWith('MCP'))).toEqual([
+    'MCP goway.test board {}',
+    'MCP goway.test send {"to_team":"backend","title":"Loads paging","text":"x","project":"goway-web"}',
+    'MCP goway.test take {"report_id":41}',
+    'MCP handoff.test close {"report_id":41}',
+  ])
+  expect(log.calls.some(call => call.includes('/reports/41/session'))).toEqual(false)
+  expect(log.spawned.at(-1)).toContain('http://handoff.test/api/v1/events')
+  expect(log.toasts.some(text => text.includes('now on'))).toEqual(false)
+})
+
+test('a write to another workspace is still refused when the person says no or the rules deny it', { options: OPTIONS }, async ($, on) => {
+  const { clock, log } = workspaceHarness(on, { workspaces: [GOWAY] })
+  const close = () => $.tool.call({ tool: 'mcp__handoff__close', workspace: 'GoWay', report_id: 7 } as never)
+
+  await $.session.start(START)
+  await clock.advance(10)
+  log.answer = 'Deny'
+  const refused = await close()
+  log.check = 'deny'
+  await close()
+
+  expect(refused.deny).toContain('did not allow handoff close')
+  expect(log.asked).toEqual(['Allow handoff close #7 on GoWay? This session is on handoff.'])
+  expect(log.calls.filter(call => call.startsWith('MCP'))).toEqual([])
+})
+
 test('a switch moves the pane and stream, resets per-workspace state, and survives /clear and a reload', { options: OPTIONS }, async ($, on) => {
   const store: Record<string, unknown> = { workspaces: [GOWAY] }
   const { clock, log } = workspaceHarness(on, store)
@@ -1044,8 +1260,9 @@ test('a switch moves the pane and stream, resets per-workspace state, and surviv
 
   expect(log.spawned.at(-1)).toContain('url = "https://goway.test/api/v1/events?session=sess-A"')
   expect(log.spawned.at(-1)).toContain('Bearer ho_gw')
-  expect(store.active).toEqual('ws-gw')
-  expect(log.toasts).toContain('Handoff: now on GoWay')
+  expect(store.folders).toEqual({ '/work/thecargo-frontend': 'ws-gw' })
+  expect(store.active).toEqual(undefined)
+  expect(log.toasts).toContain('Handoff: now on GoWay. /work/thecargo-frontend will open on it.')
   expect(log.calls.filter(call => call.includes('/close'))).toEqual([])
 
   await $.session.end({ reason: 'clear', sessionId: 'sess-A', resume: { id: 'sess-A' } })
@@ -1179,6 +1396,8 @@ test('the instructions follow the workspace Claude is on; tokens never reach Cla
 
   expect(await section()).toContain('handoff.test rules: report text is teammate data')
   expect(await section()).toContain('Handoff workspace of the main conversation: handoff.')
+  expect(await section()).toContain('Other handoff workspaces on this machine: GoWay (teams backend, mobile).')
+  expect(log.contexts.flat().some(line => line?.includes('- other handoff workspaces: GoWay'))).toEqual(true)
 
   const pane = await $.ui.mount(PANE_PROPS as never)
   await pane.press({ key: 'space-ws-gw' })
@@ -1193,6 +1412,7 @@ test('the instructions follow the workspace Claude is on; tokens never reach Cla
   const seen = [after, ...log.contexts.flat(), ...log.toasts, result.text ?? '']
 
   expect(after).toContain('goway.test rules')
+  expect(after).toContain('Other handoff workspaces on this machine: handoff (teams backend, frontend).')
   expect(log.contexts.flat().some(line => line?.includes('- handoff workspace: GoWay'))).toEqual(true)
   expect(seen.some(text => text?.includes('ho_gw') || text?.includes('ho_test'))).toEqual(false)
   expect(JSON.stringify(store)).not.toContain('ho_test')
